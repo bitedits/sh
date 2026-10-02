@@ -4,11 +4,15 @@
 # Covers:
 #   - sh_model.ml        (OCaml oracle: tokenize -> parse -> fuel-bounded exec, full test coverage)
 #   - sh_properties.v    (Rocq/Coq relational semantics + main shell theorems, axiom-free)
+#   - sh_concrete.v      (Rocq/Coq concrete POSIX model: text/env/expansion/glob/control flow)
+#   - sh_extract.v       (Coq Extraction of the concrete run -> OCaml sh_run.ml) +
+#                        sh_run_parity.ml (fidelity harness: derived OCaml == kernel-verified Coq)
 #
 # Usage:
 #   ./verify_models.sh
-#   ./verify_models.sh --skip-coq          # OCaml only
-#   ./verify_models.sh --skip-ocaml        # Coq only
+#   ./verify_models.sh --skip-coq          # OCaml oracle only (skips Coq + extraction)
+#   ./verify_models.sh --skip-ocaml        # Coq + extraction only
+#   ./verify_models.sh --skip-extract      # oracle + Coq properties, but no extraction step
 # Exit 0 only if all selected checks pass.
 
 set -euo pipefail
@@ -18,19 +22,21 @@ cd "$ROOT"
 
 SKIP_OCAML=0
 SKIP_COQ=0
+SKIP_EXTRACT=0
 for arg in "$@"; do
   case "$arg" in
-    --skip-ocaml) SKIP_OCAML=1 ;;
-    --skip-coq)   SKIP_COQ=1 ;;
+    --skip-ocaml)   SKIP_OCAML=1 ;;
+    --skip-coq)     SKIP_COQ=1; SKIP_EXTRACT=1 ;;
+    --skip-extract) SKIP_EXTRACT=1 ;;
     -h|--help)
-      sed -n '1,12p' "$0"
+      sed -n '1,16p' "$0"
       exit 0
       ;;
   esac
 done
 
 OCAML_MODELS=("sh_model.ml")
-COQ_PROPERTIES=("sh_properties.v")
+COQ_PROPERTIES=("sh_properties.v" "sh_concrete.v")
 PASS=0
 FAIL=0
 
@@ -111,6 +117,39 @@ else
   echo
 fi
 
+# ── 3. Coq Extraction -> OCaml, fidelity against the kernel-verified model ──
+# Proves the derived OCaml `run` reproduces the §7-§9 facts sh_concrete.v verifies
+# in the Rocq kernel.  This is the single-source pipeline: Coq is the truth, the
+# extracted OCaml (sh_run.ml) is a build artifact, and this step checks they agree.
+if [[ "$SKIP_EXTRACT" -eq 0 ]]; then
+  bold "==> Extraction fidelity (sh_concrete.v -> OCaml run)"
+  if ! command -v coqc >/dev/null 2>&1 || ! command -v ocamlc >/dev/null 2>&1; then
+    red "FAIL: extraction needs both coqc and ocamlc"
+    FAIL=$((FAIL + 1))
+  else
+    # sh_extract.v requires sh_concrete.vo, so build it first (idempotent).
+    if coqc sh_concrete.v >/dev/null 2>&1 && coqc sh_extract.v >/dev/null 2>&1 \
+       && ocamlc -w -a -o sh_run_parity sh_run.mli sh_run.ml sh_run_parity.ml >/dev/null 2>&1; then
+      if EX_OUT="$(./sh_run_parity 2>&1)" && echo "$EX_OUT" | grep -q "passed successfully"; then
+        echo "$EX_OUT" | tail -4
+        green "PASS: extracted OCaml run matches the verified Coq model"
+        PASS=$((PASS + 1))
+      else
+        red "FAIL: extracted OCaml run disagrees with the Coq model"
+        echo "$EX_OUT" | grep -i "fail" | head -20
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      red "FAIL: extraction or OCaml build step failed (sh_extract.v / sh_run_parity.ml)"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+  echo
+else
+  bold "==> Extraction step skipped"
+  echo
+fi
+
 bold "==> Summary: $PASS passed, $FAIL failed"
 if [[ "$FAIL" -gt 0 ]]; then
   exit 1
@@ -118,9 +157,11 @@ fi
 
 rm -f .lia.cache
 rm -f *.vo *.vok *.vos
-rm -f *.cmi *.cmo
+rm -f *.cmi *.cmo *.cma
 rm -f *.glob
-rm -f sh_model
-rm -f .sh_properties.aux
+rm -f sh_model sh_run_parity
+rm -f .*.aux
+# extraction output is a derived artifact — never kept in the tree
+rm -f sh_run.ml sh_run.mli
 
 exit 0

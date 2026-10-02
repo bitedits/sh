@@ -4,19 +4,23 @@
  * of truth for the extracted C99 shell.  Where sh_properties.v abstracts a
  * command to a nat status and a nat-keyed environment, this file models the
  * things the real shell touches — words (text), a name->value environment, an
- * external-command status oracle, and the same control operators (; && || ! if
- * while).  It is still relational-free and axiom-free: every command has a
- * decidable, fuel-bounded functional reading `run`, so the whole file compiles
- * through the kernel with no Axiom and no Parameter.
+ * external-command status oracle, word expansion, glob matching, and the full
+ * control surface the parser produces (; && || ! if while for case).  It is
+ * still relational-free and axiom-free: every command has a decidable,
+ * fuel-bounded functional reading `run`, so the whole file compiles through the
+ * kernel with no Axiom and no Parameter.
  *
  * Design notes carried into the extraction (Phase 3c/3d):
- *  - text is list ascii, NOT Coq's string, because list extracts to an OCaml
- *    list and a C pointer array while Coq string drags in list_ofascii; the
- *    extraction maps this type to OCaml string / C char*.
+ *  - text is list nat (byte codes), not Coq's string, because a list extracts to
+ *    an OCaml list and a C array while Coq string drags in list_ofascii; the
+ *    extraction maps this type to OCaml string / C char* via Extract mappings.
  *  - the external-command status is modelled as DATA (a total function on the
  *    command name), not as an effectful oracle: "true"->0, "false"->1, anything
  *    else->127 (command-not-found).  This keeps the model pure; the C shim
  *    replaces the constant arms with the real fork/execvp status at the seam.
+ *  - fuel is the single recursion measure: every fixpoint (run and its mutual
+ *    helpers, expand, glob) decreases on a leading nat argument, so all of them
+ *    are safe fixpoints and every Example below is closed by pure computation.
  *
  * Build (Rocq >= 9.0):
  *   coqc sh_concrete.v
@@ -28,8 +32,11 @@ From Stdlib Require Import Arith.
 From Stdlib Require Import Bool.
 From Stdlib Require Import Lia.
 From Stdlib Require Import PeanoNat.
-From Stdlib Require Import Ascii.
 Import ListNotations.
+
+(* cmd stores list-valued fields, so it is a nested inductive; the "register-all"
+   warning only concerns auto-generated induction schemes we never use here. *)
+Set Warnings "-register-all".
 
 (* ═══════════════════════════════════════════════════════════════════
    §1  Text: shell words as lists of byte codes
@@ -171,19 +178,147 @@ Proof.
 Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
-   §4  Concrete commands and the fuel-bounded functional semantics
+   §4  Word expansion: $name, ${name}, $?  (unset -> empty)
+   ═══════════════════════════════════════════════════════════════════ *)
+
+(* Byte codes used by the expander (POSIX/ASCII). *)
+Definition b_dollar : nat := 36.   (* '$'  *)
+Definition b_lbrace : nat := 123.  (* '{'  *)
+Definition b_rbrace : nat := 125.  (* '}'  *)
+Definition b_qmark  : nat := 63.   (* '?'  *)
+Definition b_uscore : nat := 95.   (* '_'  *)
+Definition b_0      : nat := 48.   (* '0'  *)
+
+Definition is_digit (b : nat) : bool := Nat.leb b_0 b && Nat.leb b 57.
+Definition is_alpha (b : nat) : bool :=
+  (Nat.leb 65 b && Nat.leb b 90) || (Nat.leb 97 b && Nat.leb b 122).
+Definition is_name (b : nat) : bool := is_alpha b || is_digit b || Nat.eqb b b_uscore.
+
+(* decimal rendering of a status; statuses are small so ten digits is ample. *)
+Fixpoint nat_digits (f n : nat) (acc : text) : text :=
+  match f with
+  | 0 => acc
+  | S f' => if Nat.eqb n 0 then acc else nat_digits f' (n / 10) (((n mod 10) + b_0) :: acc)
+  end.
+
+Definition nat2text (n : nat) : text :=
+  match n with
+  | 0 => [b_0]
+  | S _ => nat_digits 10 n []
+  end.
+
+(* substitute a looked-up name, or nothing when unset (model lookup_param). *)
+Definition subst_var (m : list (text * text)) (nm rest : text) : text :=
+  match getv nm m with
+  | Some v => v ++ rest
+  | None => rest
+  end.
+
+(* expand scans a word left to right; fuel is consumed once per input byte so a
+   bare '$' never loops.  The leading fuel argument decreases in every recursive
+   call across the whole mutual group, which keeps the guard checker happy. *)
+Fixpoint expand (f : nat) (m : list (text * text)) (st : nat) (inp : text) : text :=
+  match f with
+  | 0 => []
+  | S f' =>
+      match inp with
+      | [] => []
+      | b :: bs =>
+          if Nat.eqb b b_dollar then
+            match bs with
+            | [] => [b_dollar]
+            | b2 :: bs2 =>
+                if Nat.eqb b2 b_lbrace then expand_brace f' m st bs2 []
+                else if is_name b2 then expand_name f' m st bs2 [b2]
+                else if Nat.eqb b2 b_qmark then nat2text st ++ expand f' m st bs2
+                else b_dollar :: expand f' m st bs
+            end
+          else b :: expand f' m st bs
+      end
+  end
+
+with expand_name (f : nat) (m : list (text * text)) (st : nat) (inp acc : text) : text :=
+  match f with
+  | 0 => subst_var m acc []
+  | S f' =>
+      match inp with
+      | [] => subst_var m acc []
+      | b :: bs =>
+          if is_name b then expand_name f' m st bs (acc ++ [b])
+          else subst_var m acc (expand f' m st inp)
+      end
+  end
+
+with expand_brace (f : nat) (m : list (text * text)) (st : nat) (inp acc : text) : text :=
+  match f with
+  | 0 => []
+  | S f' =>
+      match inp with
+      | [] => []
+      | b :: bs =>
+          if Nat.eqb b b_rbrace then subst_var m acc (expand f' m st bs)
+          else expand_brace f' m st bs (acc ++ [b])
+      end
+  end.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §5  Glob matching for case patterns ('*' and '?')
+   ═══════════════════════════════════════════════════════════════════ *)
+
+Definition b_star : nat := 42.   (* '*'  *)
+
+(* fuel-bounded glob: '*' matches any run of bytes, '?' matches one byte,
+   anything else must match literally. *)
+Fixpoint glob (f : nat) (pat str : text) : bool :=
+  match f with
+  | 0 => false
+  | S f' =>
+      match pat with
+      | [] => match str with [] => true | _ => false end
+      | p :: ps =>
+          if Nat.eqb p b_star then
+            match str with
+            | [] => glob f' ps []
+            | _ :: ss => glob f' ps str || glob f' pat ss
+            end
+          else
+            match str with
+            | [] => false
+            | s :: ss =>
+                if Nat.eqb p b_qmark then glob f' ps ss
+                else if Nat.eqb p s then glob f' ps ss else false
+            end
+      end
+  end.
+
+(* first-match over a branch's alternative patterns; only glob is used here, so
+   this is a standalone fixpoint rather than part of the run mutual group. *)
+Fixpoint match_any (f : nat) (pats : list text) (scrut : text) : bool :=
+  match f with
+  | 0 => false
+  | S f' =>
+      match pats with
+      | [] => false
+      | p :: r => glob f' p scrut || match_any f' r scrut
+      end
+  end.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §6  Concrete commands and the fuel-bounded functional semantics
    ═══════════════════════════════════════════════════════════════════ *)
 
 Inductive cmd : Type :=
   | Skip                          (* empty command: state unchanged *)
-  | Ext  (name : text)            (* external command / builtin *)
-  | Assign (k v : text)           (* name=value prefix assignment *)
+  | Ext  (name : text)            (* external command / builtin (already expanded) *)
+  | Assign (k v : text)           (* name=value prefix assignment (value already expanded) *)
   | Seq  (c1 c2 : cmd)            (* c1 ; c2 *)
   | And  (c1 c2 : cmd)            (* c1 && c2 *)
   | Or   (c1 c2 : cmd)            (* c1 || c2 *)
   | Bang (c : cmd)                (* ! c *)
   | If   (cond t e : cmd)         (* if cond then t else e *)
   | While (cond body : cmd)       (* while cond do body done *)
+  | For (var : text) (ws : list text) (body : list cmd)   (* for var in ws; do body; done *)
+  | Case (scrut : text) (brs : list (list text * list cmd)) (* case scrut in pats) body ;; ... esac *)
   .
 
 Definition obind {A B : Type} (x : option A) (f : A -> option B) : option B :=
@@ -193,7 +328,9 @@ Definition obind {A B : Type} (x : option A) (f : A -> option B) : option B :=
   end.
 
 (* run f c s — the executable reading of a command.  Fuel is consumed only at
-   compound nodes; atomic commands run at every fuel level. *)
+   compound nodes; atomic commands run at every fuel level.  run, run_seq,
+   run_for, run_case and match_any form one mutual group, all decreasing on the
+   leading fuel argument, so the kernel accepts them as safe fixpoints. *)
 Fixpoint run (f : nat) (c : cmd) (s : cstate) : option cstate :=
   match f with
   | 0 =>
@@ -227,6 +364,49 @@ Fixpoint run (f : nat) (c : cmd) (s : cstate) : option cstate :=
                if Nat.eqb (cstatus sc) 0
                then obind (run f' body sc) (run f' (While cond body))
                else Some sc)
+      | For var ws body =>
+          run_for f' var ws body s
+      | Case scrut brs =>
+          run_case f' scrut brs s
+      end
+  end
+
+with run_seq (f : nat) (cmds : list cmd) (s : cstate) : option cstate :=
+  match f with
+  | 0 => None
+  | S f' =>
+      match cmds with
+      | [] => Some (CS 0 (cenv s))
+      | [c] => run f' c s
+      | c :: c2 :: r => obind (run f' c s) (run_seq f' (c2 :: r))
+      end
+  end
+
+with run_for (f : nat) (var : text) (ws : list text) (body : list cmd) (s : cstate) : option cstate :=
+  match f with
+  | 0 => None
+  | S f' =>
+      match ws with
+      | [] => Some (CS 0 (cenv s))
+      | [w] =>
+          let s1 := CS (cstatus s) (setv var (expand f' (cenv s) (cstatus s) w) (cenv s)) in
+          run_seq f' body s1
+      | w :: w2 :: r =>
+          let s1 := CS (cstatus s) (setv var (expand f' (cenv s) (cstatus s) w) (cenv s)) in
+          obind (run_seq f' body s1) (run_for f' var (w2 :: r) body)
+      end
+  end
+
+with run_case (f : nat) (scrut : text) (brs : list (list text * list cmd)) (s : cstate) : option cstate :=
+  match f with
+  | 0 => None
+  | S f' =>
+      match brs with
+      | [] => Some (CS 0 (cenv s))
+      | (pats, body) :: r =>
+          if match_any f' pats (expand f' (cenv s) (cstatus s) scrut)
+          then run_seq f' body s
+          else run_case f' scrut r s
       end
   end.
 
@@ -252,7 +432,7 @@ Lemma run_assign : forall f k v s,
 Proof. intros f k v s; destruct f; reflexivity. Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
-   §5  Control-flow boundary laws (the src/ conformance surface)
+   §7  Control-flow boundary laws (the src/ conformance surface)
    ═══════════════════════════════════════════════════════════════════ *)
 
 (* && short-circuits: a failing left operand stops the list and the right never
@@ -349,3 +529,85 @@ Lemma assign_isolated :
 Proof.
   intros k k2 v s0 Hne. cbn. apply getv_set_other. exact Hne.
 Qed.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §8  Behaviour of the expander and the matcher, checked by computation.
+   ═══════════════════════════════════════════════════════════════════ *)
+
+Example expand_var_present : expand 4 [([97], [98])] 0 [36; 97] = [98].
+Proof. reflexivity. Qed.
+
+Example expand_var_unset : expand 4 [] 0 [36; 97] = [].
+Proof. reflexivity. Qed.
+
+Example expand_var_brace : expand 6 [([97], [98])] 0 [36; 123; 97; 125] = [98].
+Proof. reflexivity. Qed.
+
+Example expand_status_zero : expand 2 [] 0 [36; 63] = [48].
+Proof. reflexivity. Qed.
+
+Example expand_status_one : expand 2 [] 1 [36; 63] = [49].
+Proof. reflexivity. Qed.
+
+Example expand_lone_dollar : expand 3 [] 0 [36; 64; 65] = [36; 64; 65].
+Proof. reflexivity. Qed.
+
+Example glob_exact : glob 4 [97; 98] [97; 98] = true.
+Proof. reflexivity. Qed.
+
+Example glob_question : glob 3 [97; 63] [97; 99] = true.
+Proof. reflexivity. Qed.
+
+Example glob_star : glob 6 [97; 42] [97; 99; 100] = true.
+Proof. reflexivity. Qed.
+
+Example glob_mismatch : glob 4 [97; 98] [97; 99] = false.
+Proof. reflexivity. Qed.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §9  End-to-end: run binds the environment the expander reads, and the
+       for/case forms run the expanded control surface.
+   ═══════════════════════════════════════════════════════════════════ *)
+
+(* A whole list: assign a=b, then expand "$a" in the produced environment gives
+   "b".  The environment is exactly `run (Assign a b)`'s output. *)
+Example assign_then_expand :
+  expand 4 (setv [97] [98] []) 0 [36; 97] = [98].
+Proof. reflexivity. Qed.
+
+(* for x in a b: the loop leaves x bound to the last word, status 0. *)
+Example for_binds_last :
+  run 6 (For [120] [[97]; [98]] [Skip]) (CS 0 []) = Some (CS 0 [([120], [98])]).
+Proof. reflexivity. Qed.
+
+(* for over an empty word list runs the body zero times and returns 0. *)
+Example for_empty :
+  run 3 (For [120] [] [Ext false_w]) (CS 5 []) = Some (CS 0 []).
+Proof. reflexivity. Qed.
+
+(* case: the first matching pattern's body runs; 'a' matches pattern 'a'.
+   Each branch carries a LIST of alternative glob patterns; here one each. *)
+Example case_first_match :
+  run 6 (Case [97] [([[97]], [Ext false_w]); ([[42]], [Ext true_w])]) (CS 0 [])
+  = Some (CS 1 []).
+Proof. reflexivity. Qed.
+
+(* case: 'a' does not match 'b', so the '*' (match-all) branch runs. *)
+Example case_star_fallback :
+  run 6 (Case [97] [([[98]], [Ext false_w]); ([[42]], [Ext true_w])]) (CS 0 [])
+  = Some (CS 0 []).
+Proof. reflexivity. Qed.
+
+(* case with no matching branch leaves status 0. *)
+Example case_no_match :
+  run 6 (Case [97] [([[98]], [Ext false_w])]) (CS 0 []) = Some (CS 0 []).
+Proof. reflexivity. Qed.
+
+(* for over one word expands that word against the live environment before
+   binding the loop variable: with a=9 in scope, `for x in $a` binds x to 9.
+   (Ext/Assign words are pre-expanded by the parser bridge, so the for-loop's
+   own word-list expansion is the read-back demonstrated here.) *)
+Example for_expands_word :
+  run 6 (For [120] [[36; 97]] [Skip]) (CS 0 [([97], [57])])
+  = Some (CS 0 [([97], [57]); ([120], [57])]).
+Proof. reflexivity. Qed.
