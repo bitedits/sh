@@ -1,183 +1,282 @@
 open Ast
 open Unix
-open Token
 open Stdlib
-open Parser
 
-let rec execute_program = function
-  | Program items -> List.iter execute_list_item items
-  | _ -> failwith "Expected Program"
+(* Reference interpreter.  Its control-flow rules mirror the verified model in
+   verify/models (sh_model.ml and sh_properties.v):
+     ;     runs both commands, the list status is the last command's status
+     &&    runs the right command only when the left status is zero
+     ||    runs the right command only when the left status is non-zero
+     !     inverts a zero/non-zero status
+   if/while/until branch purely on the status of their condition list. *)
 
-and execute_list_item = function
-  | ListItem (and_or, sep) ->
-      let status = execute_exp and_or in
-      (match sep with
-       | Some `Amp ->
-           if fork () = 0 then begin
-             ignore (execute_exp and_or);
-             exit 0
-           end
-       | _ -> ())
-  | _ -> failwith "Expected ListItem"
+let vars : (string * string) list ref = ref []
+let funcs : (string * exp) list ref = ref []
+let last_status = ref 0
 
-and execute_exp = function
-  | Pipeline (bang, cmds) -> execute_pipeline (bang, cmds)
-  | AndIf (a, p) -> if execute_exp a = 0 then execute_exp p else 1
-  | OrIf (a, p) -> if execute_exp a <> 0 then execute_exp p else 0
-  | List (a, op, b) ->
-      let status = execute_exp a in
-      (match op with
-       | `Amp ->
-           if fork () = 0 then begin
-             ignore (execute_exp b);
-             exit 0
-           end;
-           status
-       | `Semi -> if status = 0 then execute_exp b else status)
-  | exp -> execute_command exp
+let setvar k v = vars := (k, v) :: List.remove_assoc k !vars
+let getvar k = try Some (List.assoc k !vars) with Not_found -> None
 
-and execute_pipeline (bang, cmds) =
-  let rec pipe cmds =
-    match cmds with
-    | [cmd] -> execute_command cmd
-    | cmd :: rest ->
-        let (r, w) = Unix.pipe () in
-        let pid = fork () in
-        if pid = 0 then begin
-          dup2 w Unix.stdout; close r; close w;
-          ignore (execute_command cmd);
-          exit 0
-        end else begin
-          dup2 r Unix.stdin; close r; close w;
-          let rest_status = pipe rest in
-          let (_, cmd_wstatus) = waitpid [] pid in
-          let cmd_status = match cmd_wstatus with WEXITED n -> n | _ -> 1 in
-          if cmd_status <> 0 then cmd_status else rest_status
-        end
-    | [] -> 0
+(* expand $name, ${name} and $? ; strip one layer of surrounding quotes *)
+let expand (s : string) : string =
+  let s =
+    let n = String.length s in
+    if n >= 2 && ((s.[0] = '"' && s.[n - 1] = '"') || (s.[0] = '\'' && s.[n - 1] = '\''))
+    then String.sub s 1 (n - 2) else s
   in
-  let status = pipe cmds in
-  if bang then if status = 0 then 1 else 0 else status
+  let is_name_char c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '_'
+  in
+  let buf = Buffer.create (String.length s + 8) in
+  let i = ref 0 and n = String.length s in
+  while !i < n do
+    let c = String.unsafe_get s !i in
+    if c <> '$' then (Buffer.add_char buf c; incr i)
+    else begin
+      incr i;                                   (* consume '$' *)
+      let consumed, value =
+        if !i < n && String.unsafe_get s !i = '{' then begin
+          incr i;
+          let name = Buffer.create 8 in
+          while !i < n && String.unsafe_get s !i <> '}' do
+            Buffer.add_char name (String.unsafe_get s !i); incr i
+          done;
+          if !i < n then incr i;                (* consume '}' *)
+          (true, getvar (Buffer.contents name))
+        end
+        else if !i < n && is_name_char (String.unsafe_get s !i) then begin
+          let name = Buffer.create 8 in
+          while !i < n && is_name_char (String.unsafe_get s !i) do
+            Buffer.add_char name (String.unsafe_get s !i); incr i
+          done;
+          (true, getvar (Buffer.contents name))
+        end
+        else if !i < n && String.unsafe_get s !i = '?' then begin
+          incr i; (true, Some (string_of_int !last_status))
+        end
+        else (false, None)
+      in
+      (* A $name / ${name} / $? reference always expands (unset => empty,
+         matching the model's lookup_param); a lone '$' that is not a valid
+         parameter reference is left literal. *)
+      match consumed, value with
+      | true, Some v -> Buffer.add_string buf v
+      | true, None -> ()
+      | false, _ -> Buffer.add_char buf '$'
+    end
+  done;
+  Buffer.contents buf
 
-and execute_command = function
-  | Simple (Some (cmd, args), redirects) ->
-      let pid = fork () in
-      if pid = 0 then begin
-        List.iter apply_redirect redirects;
-        (try execvp cmd (Array.of_list (cmd :: args))
-         with Unix_error (ENOENT, _, _) -> 
-           Printf.eprintf "ush: command not found: %s\n" cmd; exit 127)
-      end else begin
-        let (_, status) = waitpid [] pid in
-        match status with WEXITED n -> n | _ -> 1
-      end
-  | Simple (None, redirects) ->
-      List.iter apply_redirect redirects; 0
-  | Compound (comp, redirects) ->
-      let pid = fork () in
-      if pid = 0 then begin
-        List.iter apply_redirect redirects;
-        ignore (execute_exp comp); exit 0
-      end else begin
-        let (_, status) = waitpid [] pid in
-        match status with WEXITED n -> n | _ -> 1
-      end
-  | FunctionDef (name, body) -> 0
-  | _ -> failwith "Expected command"
+let expand_all ws = List.map expand ws
 
-and apply_redirect = function
-  | IoFile (n, op, file) ->
-      let fd = openfile file [O_WRONLY; O_CREAT] 0o666 in
+let status_of = function
+  | WEXITED n | WSTOPPED n -> n
+  | WSIGNALED s -> 128 + s
+
+(* case pattern match: exact text, with '*' and '?' globbing *)
+let rec glob pat str =
+  let lp = String.length pat and ls = String.length str in
+  if lp = 0 then ls = 0
+  else match pat.[0] with
+    | '*' ->
+        let rest = String.sub pat 1 (lp - 1) in
+        let rec go i = i > ls || (glob rest (String.sub str i (ls - i)) || go (i + 1)) in
+        go 0
+    | '?' -> ls > 0 && glob (String.sub pat 1 (lp - 1)) (String.sub str 1 (ls - 1))
+    | c -> ls > 0 && c = str.[0] && glob (String.sub pat 1 (lp - 1)) (String.sub str 1 (ls - 1))
+
+let apply_redirect = function
+  | IoFile (_, op, file) ->
+      let f = expand file in
       (match op with
-       | Great -> dup2 fd Unix.stdout
-       | DGreat -> dup2 fd Unix.stdout
-       | Less -> dup2 fd Unix.stdin
-       | _ -> ());
-      close fd
-  | IoHere _ -> ()
-  | Assignment s ->
-      let parts = String.split_on_char '=' s in
-      Unix.putenv (List.hd parts) (List.nth parts 1)
+       | Less -> let fd = openfile f [O_RDONLY] 0o644 in dup2 fd Unix.stdin; close fd
+       | Great -> let fd = openfile f [O_WRONLY; O_CREAT; O_TRUNC] 0o666 in dup2 fd Unix.stdout; close fd
+       | DGreat -> let fd = openfile f [O_WRONLY; O_CREAT; O_APPEND] 0o666 in dup2 fd Unix.stdout; close fd
+       | LessGreat -> let fd = openfile f [O_RDWR; O_CREAT] 0o666 in dup2 fd Unix.stdin; dup2 fd Unix.stdout; close fd
+       | _ -> ())
   | _ -> ()
 
-and execute_compound = function
-  | BraceGroup cmds -> List.iter (fun cmd -> ignore (execute_command cmd)) cmds
-  | Subshell cmds -> List.iter (fun cmd -> ignore (execute_command cmd)) cmds
-  | ForClause (var, words, body) ->
-      let words = match words with Some ws -> ws | None -> [] in
-      List.iter (fun w -> Unix.putenv var w; List.iter (fun cmd -> ignore (execute_command cmd)) body) words
-  | CaseClause (word, cases) ->
-      List.iter (fun (pats, cmds) ->
-        if List.mem word pats then List.iter (fun cmd -> ignore (execute_command cmd)) cmds) cases
-  | IfClause (cond, then_part, elifs, else_part) ->
-      if execute_condition cond then List.iter (fun cmd -> ignore (execute_command cmd)) then_part
+(* run a block, returning the status of its last command (0 when empty) *)
+let rec execute_exp e = let s = execute_exp_node e in last_status := s; s
+
+and run_seq (cmds : exp list) : int =
+  List.fold_left (fun _ c -> execute_exp c) 0 cmds
+
+and execute_exp_node : exp -> int = function
+  | List (a, sep, b) ->
+      (* ';' runs both, status = right; '&' is sequential here, like the model *)
+      ignore sep; ignore (execute_exp a); execute_exp b
+  | AndIf (a, b) -> let s = execute_exp a in if s = 0 then execute_exp b else s
+  | OrIf (a, b) -> let s = execute_exp a in if s = 0 then s else execute_exp b
+  | Pipeline (bang, cmds) ->
+      let s = run_pipeline cmds in
+      if bang then (if s = 0 then 1 else 0) else s
+  | Compound (cc, redirs) ->
+      if redirs = [] then execute_exp cc
       else begin
-        let rec check_elifs = function
-          | [] -> (match else_part with Some e -> List.iter (fun cmd -> ignore (execute_command cmd)) e | None -> ())
-          | (c, t) :: rest ->
-              if execute_condition c then List.iter (fun cmd -> ignore (execute_command cmd)) t
-              else check_elifs rest
-        in check_elifs elifs
+        let pid = fork () in
+        if pid = 0 then begin
+          List.iter apply_redirect redirs;
+          exit (execute_exp cc)
+        end
+        else status_of (snd (waitpid [] pid))
+      end
+  | Simple _ as c -> execute_command c
+  | FunctionDef (name, body) -> funcs := (name, body) :: !funcs; 0
+  | BraceGroup cmds -> run_seq cmds
+  | Subshell cmds ->
+      let pid = fork () in
+      if pid = 0 then exit (run_seq cmds) else status_of (snd (waitpid [] pid))
+  | ForClause (var, words, body) ->
+      let ws = match words with Some l -> l | None -> [] in
+      List.fold_left (fun _ w -> setvar var (expand w); run_seq body) 0 ws
+  | CaseClause (w, cases) ->
+      let target = expand w in
+      (match List.find_map
+               (fun (pats, body) ->
+                 if List.exists (fun p -> glob (expand p) target) pats then Some (run_seq body)
+                 else None)
+               cases
+       with Some s -> s | None -> 0)
+  | IfClause (cond, then_part, elifs, else_part) ->
+      if run_seq cond = 0 then run_seq then_part
+      else begin
+        let rec probe = function
+          | [] -> (match else_part with Some e -> run_seq e | None -> 0)
+          | (c, t) :: rest -> if run_seq c = 0 then run_seq t else probe rest
+        in probe elifs
       end
   | WhileClause (cond, body) ->
-      while execute_condition cond do List.iter (fun cmd -> ignore (execute_command cmd)) body done
+      let s = ref 0 in
+      while run_seq cond = 0 do s := run_seq body done; !s
   | UntilClause (cond, body) ->
-      while not (execute_condition cond) do List.iter (fun cmd -> ignore (execute_command cmd)) body done
-  | _ -> failwith "Expected compound command"
+      let s = ref 0 in
+      while run_seq cond <> 0 do s := run_seq body done; !s
+  | ListItem (e, _) -> execute_exp e
+  | Program items -> run_seq items
+  | AndOr e -> execute_exp e
+  | _ -> 1
 
-and execute_condition cmds =
-  let status = List.fold_left (fun acc cmd ->
-    let s = execute_command cmd in
-    if acc = 0 then s else acc) 0 cmds
-  in status = 0
+and run_pipeline cmds =
+  let n = List.length cmds in
+  if n <= 1 then
+    (match cmds with [c] -> execute_command c | _ -> 0)
+  else begin
+    let pfd = Array.make (n - 1) (Unix.stdin, Unix.stdin) in
+    for i = 0 to n - 2 do pfd.(i) <- pipe () done;
+    let pids = Array.make n 0 in
+    List.iteri
+      (fun i cmd ->
+        let pid = fork () in
+        if pid = 0 then begin
+          if i > 0 then dup2 (fst pfd.(i - 1)) Unix.stdin;
+          if i < n - 1 then dup2 (snd pfd.(i)) Unix.stdout;
+          for j = 0 to n - 2 do close (fst pfd.(j)); close (snd pfd.(j)) done;
+          exit (execute_command cmd)
+        end
+        else pids.(i) <- pid)
+      cmds;
+    for j = 0 to n - 2 do close (fst pfd.(j)); close (snd pfd.(j)) done;
+    let st = ref 0 in
+    for i = 0 to n - 1 do
+      let (_, s) = waitpid [] pids.(i) in st := status_of s
+    done;
+    !st
+  end
 
-let parse_string2 input =
-  try
-    let lexbuf = Lexing.from_string (input ^ "\n") in
-    let rec print_tokens () =
-      let tok = Lexer.token lexbuf in
-      if tok = EOF then () else (Printf.printf "Token: %s\n" (tokenToString tok); print_tokens ())
-    in
-    let _ = print_tokens () in
-    let lexbuf = Lexing.from_string (input ^ "\n") in
-    Printf.printf "Starting parse...\n"; flush stdout;
-    let ast = Parser.program Lexer.token lexbuf in
-    let _ = Printf.printf "Debug 2: %s\n" (string_of_exp ast) in
-    flush stdout;
-    Some ast
-  with
-  | Lexer.Error msg -> Printf.printf "Lexer error: %s\n" msg; flush stdout; None
-  | Parser.Error -> Printf.printf "Parse error at position %d\n" (Lexing.lexeme_start (Lexing.from_string input)); flush stdout; None
-  | Error.Parser (line, tok, _) -> Printf.printf "Custom parse error at line %d, token '%s'\n" line tok; flush stdout; None
-  | ex -> Printf.printf "Unexpected error: %s\n" (Printexc.to_string ex); flush stdout; None
+and execute_command = function
+  | Simple (Some (cmd, args), items) ->
+      (* assignment prefixes update the shell variables (model semantics) *)
+      List.iter
+        (fun it -> match it with Assignment s -> bind_assignment s | _ -> ())
+        items;
+      let c = expand cmd in
+      let rest = expand_all args in
+      (match lookup_builtin c rest with
+       | Some code -> code
+       | None ->
+           match List.find_opt (fun (n, _) -> n = c) !funcs with
+           | Some (_, body) -> execute_exp body
+           | None ->
+               let pid = fork () in
+               if pid = 0 then begin
+                 List.iter
+                   (fun it -> match it with IoFile _ -> apply_redirect it | _ -> ())
+                   items;
+                 try execvp c (Array.of_list (c :: rest))
+                 with Unix_error (ENOENT, _, _) ->
+                   prerr_string "ush: command not found: "; prerr_string c;
+                   prerr_newline (); exit 127
+               end
+               else status_of (snd (waitpid [] pid)))
+  | Simple (None, items) ->
+      List.iter
+        (fun it -> match it with
+          | Assignment s -> bind_assignment s
+          | IoFile _ -> apply_redirect it
+          | _ -> ())
+        items;
+      0
+  | e -> execute_exp e
 
-let parse_string input =
-  try
-    let lexbuf = Lexing.from_string (input ^ "\n") in
-    let rec print_tokens () =
-      let tok = Lexer.token lexbuf in
-      if tok = EOF then () else (Printf.printf "Token: %s\n" (tokenToString tok); print_tokens ())
-    in
-    let _ = print_tokens () in
-    let lexbuf = Lexing.from_string (input ^ "\n") in
-    Printf.printf "Starting parse...\n"; flush stdout;
-    let ast = Parser.program Lexer.token lexbuf in
-    let _ = Printf.printf "Debug 2: %s\n" (string_of_exp ast) in
-    flush stdout;
-    Some ast
-  with
-  | Lexer.Error msg -> Printf.eprintf "Lexer error: %s\n" msg; flush stdout; None
-  | Parser.Error -> Printf.printf "Parse error at position %d\n" (Lexing.lexeme_start (Lexing.from_string input)); flush stdout; None
-  | ex -> Printf.eprintf "Unexpected error: %s\n" (Printexc.to_string ex); flush stdout; None
+and bind_assignment s =
+  match String.index_opt s '=' with
+  | Some i ->
+      let k = String.sub s 0 i in
+      let v = String.sub s (i + 1) (String.length s - i - 1) in
+      setvar k (expand v)
+  | None -> ()
+
+(* a few builtins run in the current shell so their effects persist *)
+and lookup_builtin c args =
+  match c with
+  | ":" | "true" -> Some 0
+  | "false" -> Some 1
+  | "exit" -> Some (match args with [x] -> (try int_of_string x with _ -> 0) | _ -> 0)
+  | "cd" ->
+      let dir = match args with [x] -> x | _ -> (try Sys.getenv "HOME" with _ -> "/") in
+      (try Sys.chdir dir; Some 0 with _ -> prerr_string "cd: failed\n"; Some 1)
+  | _ -> None
+
+(* ── driver ──────────────────────────────────────────────────────── *)
+
+let parse_line input =
+  let lexbuf = Lexing.from_string (input ^ "\n") in
+  try Some (Parser.main Lexer.token lexbuf) with
+  | Lexer.Error msg -> Printf.eprintf "ush: lexer error: %s\n" msg; None
+  | Parser.Error ->
+      Printf.eprintf "ush: syntax error near offset %d\n" (Lexing.lexeme_start lexbuf); None
+
+let run_source filename =
+  let ic = open_in_gen [Open_rdonly; Open_text] 0 filename in
+  let buf = Buffer.create 4096 in
+  (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+  close_in ic;
+  ignore (Option.map execute_exp (parse_line (Buffer.contents buf)))
 
 let repl () =
-  print_endline ("Synrc POSIX Shell (c) 2025\n");
-  try while true do
-    print_string "$ ";
-    let line = read_line () in
-    match parse_string line with
-    | Some ast -> Printf.printf ": Parsed (%s)\n" (string_of_exp ast)
-    | None -> Printf.printf ": None\n"
-  done with End_of_file -> print_newline ()
+  print_endline "ush - POSIX shell prototype (Ctrl-D to exit)";
+  try
+    while true do
+      print_string "$ "; flush stdout;
+      let line = read_line () in
+      match parse_line line with
+      | Some ast -> last_status := execute_exp ast
+      | None -> ()
+    done
+  with End_of_file -> print_newline ()
 
-let () = repl ()
+let parse_only filename =
+  let ic = open_in_gen [Open_rdonly; Open_text] 0 filename in
+  let buf = Buffer.create 4096 in
+  (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+  close_in ic;
+  match parse_line (Buffer.contents buf) with
+  | Some ast -> print_string (Ast.string_of_exp ast); print_newline (); print_endline "[PARSE OK]"
+  | None -> print_endline "[PARSE FAIL]"; exit 1
+
+let () =
+  match Array.to_list Sys.argv with
+  | [ _; "-p"; file ] -> parse_only file
+  | [ _; file ] -> run_source file
+  | _ -> repl ()

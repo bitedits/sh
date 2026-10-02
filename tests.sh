@@ -15,9 +15,9 @@ for x in a b c; do
   echo "$x"
 done
 
-# For loop (test case, non-strict POSIX)
+# For loop (single-line POSIX form)
 
-for x in a b c do echo $x done
+for x in a b c; do echo $x; done
 
 # If statement
 

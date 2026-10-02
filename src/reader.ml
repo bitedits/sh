@@ -27,6 +27,6 @@ let parse filename =
   Error.handleErrors
     (fun chan ->
       let lexbuf = Lexing.from_channel chan in
-      let file = parseErr Parser.program lexbuf filename in
+      let file = parseErr Parser.main lexbuf filename in
       print_endline (string_of_exp file))
     chan ()
