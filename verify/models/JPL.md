@@ -1,10 +1,74 @@
-# JPL-compliant C99 extraction — 3d-C re-architecture plan
+# JPL-Compliant C99 Extraction — Design Specification
 
-Status: DECISIONS LOCKED (2026-10-03) — saturate-to-error + proposed default caps.
-Governs Phase 3d-C. Supersedes the earlier "transpile sh_run.ml directly" plan,
-which violated the JPL rule set.
+**Scope.** Governing design reference for Phase 3d-C: produce a C99 kernel whose
+emitted form satisfies the **mandatory NASA JPL PowerPC C rule set**, while keeping
+every *semantic* transform inside the verified Coq model. The Introduction motivates
+the NASA JPL standard and its three-category structure; Sections 1–9 state the
+standing design (principles, compliance contract, bounded representation, machine
+architecture, extraction contract, verification strategy, construction order). Dated
+decisions, build milestones, and live validation probes are quarantined under
+[HISTORY — development record and hints](#history--development-record-and-hints).
+The language-agnostic verification stack (axiom layers L0–L6, derived rungs D1–D4)
+is documented separately in `AXIOTACK.md`; this file governs only the C99-targeted
+re-architecture that sits on top of it.
 
-## Why re-architecture (not direct emit)
+## Table of contents
+
+- [Introduction](#introduction) — motivation and structure of the NASA JPL standard
+- [1. Problem: why re-architecture (not direct emit)](#1-problem-why-re-architecture-not-direct-emit)
+- [2. Design principles (invariants)](#2-design-principles-invariants)
+- [3. JPL compliance contract — how each mandatory rule is supported](#3-jpl-compliance-contract--how-each-mandatory-rule-is-supported-file--theorem)
+- [4. Bounded representation (the budget)](#4-bounded-representation-the-budget)
+  - [4.1 Capacity constants](#41-capacity-constants)
+  - [4.2 Overflow / bound-exhaustion policy](#42-overflow--bound-exhaustion-policy--saturate-to-error)
+- [5. Recursion elimination — the small-step machine](#5-recursion-elimination--the-small-step-machine)
+- [6. Extraction contract](#6-extraction-contract)
+  - [6.1 Established extraction behaviour](#61-established-extraction-behaviour)
+- [7. Verification: JPL lint gate (design)](#7-verification-jpl-lint-gate-design)
+- [8. Verification: differential gate (design)](#8-verification-differential-gate-design)
+- [9. Construction order (matches task list)](#9-construction-order-matches-task-list)
+- [HISTORY — development record and hints](#history--development-record-and-hints)
+
+## Introduction
+
+*The NASA JPL C standard — its motivation and structure.*
+
+**What it is.** The NASA Jet Propulsion Laboratory / Public Safety-Critical
+Software (PCS) *C Coding Standards for the PowerPC* is a rulebook for writing C in
+safety-critical embedded flight software, aimed at the PowerPC processors used
+aboard spacecraft and launch vehicles.
+
+**Why it exists (motivation).** The authors mined large bodies of real flight code
+and correlated coding constructs with the defects actually found. Two facts drive
+the whole standard:
+
+- Flight software is effectively **immutable after launch** — a latent defect
+  cannot be patched in the field, so the cost of a bug is a lost mission.
+- Many C constructs are **undefined, implementation-defined, or silently lossy** on
+  embedded targets; they let defects hide during development and surface only in
+  flight.
+
+The rules therefore forbid constructs that conceal latent defects, favouring
+explicitness, boundedness, and local verifiability over convenience — which is
+precisely the discipline a mechanically-verified extraction must reproduce.
+
+**How it is structured.** The standard's ~44 rules fall into three categories, and
+this taxonomy is what the rest of this document is built against:
+
+| Category | Meaning | Our stance |
+|---|---|---|
+| **Mandatory** | Rules whose violation has demonstrably caused defects; any deviation must be justified in writing. | The target set. Coq proves the *semantic* precondition; the emitter + lint gate enforce the *syntactic* form (§3). |
+| **Apocryphal** | Popular rules for which the defect analysis found no supporting evidence. | Not treated as blockers; honoured only where free. |
+| **Advisory** | Consensus reliability/maintainability guidance, hard to check objectively. | Applied where it does not conflict with the mandatory set. |
+
+Each published rule carries a *rationale* (usually a real incident), an *exception*
+policy, and a *verification method*. This document mirrors that two-sided
+discipline: every mandatory rule in §3 is stated with (a) the Coq theorem that
+guarantees the model satisfies it semantically, and (b) the emitter/lint mechanism
+that checks the emitted C syntactically. **This project targets the mandatory
+set.**
+
+## 1. Problem: why re-architecture (not direct emit)
 
 The current single source of truth, `verify/models/sh_concrete.v`, extracts (via
 Coq Extraction) to OCaml (`src/kernel/sh_run.ml`) that is **fuel-bounded
@@ -13,25 +77,34 @@ higher-order `obind` callbacks). A literal OCaml->C99 emit would therefore use
 `malloc`, recursion, boxed unary naturals, and function pointers — each of which
 breaks a mandatory canonical JPL PowerPC C rule.
 
-Decisions locked by the user:
+Two commitments define the approach:
 - Transforms that make the C JPL-clean live **in the Coq source**, not the
   emitter: re-aim the model to **iteration over bounded array structures**, then
   run a **simple, narrow** OCaml->C99 emitter.
 - Target the **canonical JPL 44-rule C standard**, enforced mechanically by a lint
   gate over the emitted C.
 
-## Design invariants
+## 2. Design principles (invariants)
 
-1. **Axiom-free throughout.** Every new Coq file must satisfy
+1. **Transforms live in the Coq source, not the emitter.** Any rewrite that makes
+   the C JPL-clean — iteration over recursion, bounded arrays over heap lists,
+   effects as data over callbacks — is performed and *proved* in Coq. The emitter
+   keeps exactly one mechanical duty: the **layout** mapping (bounded `list` →
+   static array + length, `nat` → `uint32`), justified by the Coq `wf_bword`/`wf_benv`
+   well-formedness bounds. Layout is representation, not semantics.
+2. **Axiom-free throughout.** Every new Coq file must satisfy
    `coqchk -o -silent` four `<none>` lines. No `Axiom`/`Parameter`/`Admitted`.
-2. **Behavioral isomorphism.** The new iterative kernel must reproduce the
+3. **Behavioral isomorphism.** The new iterative kernel must reproduce the
    observable results of `sh_concrete.run` (same status/env outcomes) so the 26
    extraction-fidelity parity checks stay green when re-pointed at it.
-3. **Keep existing gates green while building alongside.** Do not edit
+4. **Keep existing gates green while building alongside.** Do not edit
    `sh_concrete.v` or `src/kernel/sh_run.ml` destructively. New files first;
    migrate ush + vendored kernel only after parity + conformance pass.
+5. **Saturate-to-error over wraparound.** A bound breach returns a defined
+   `LIMIT_EXHAUSTED` status (the analogue of the model's `fuel = 0 -> None`), never
+   silent wraparound — truncation must be observable, not hidden.
 
-## JPL compliance levels — how each is supported (file · theorem)
+## 3. JPL compliance contract — how each mandatory rule is supported (file · theorem)
 
 The canonical JPL PowerPC C document splits its rules into **mandatory**,
 **apocryphal**, and **advisory**. We target the *mandatory* set, and treat it as a
@@ -56,14 +129,14 @@ agree with the spec, not just shaped right): `sh_jpl_run.v` `step_preserves` +
 `mrun_sound` (⊢), `sh_jpl_run_phase2.v` `mrun_live` + `mloop_iff` /
 `mloop_sound_complete` (⇐ and the two-sided `run ⇄ mloop`).
 
-## Bounded representation (the budget)
+## 4. Bounded representation (the budget)
 
 `nat` (byte codes 0..255, fuel, status 0..255) maps to a fixed-width **unsigned**
 machine type. All arithmetic is unsigned with an explicit bound discipline; within
 the caps below, unsigned arithmetic is a bijection with Peano, so parity with the
 OCaml kernel is preserved.
 
-### Caps (LOCKED — user confirmed proposed defaults 2026-10-03)
+### 4.1 Capacity constants
 
 | constant | value | bounds |
 |---|---|---|
@@ -76,20 +149,17 @@ OCaml kernel is preserved.
 | `MAX_FUEL` | 4096 | loop-iteration bound (matches ush's current fuel budget) |
 | `MAX_STACK` | 8192 | explicit machine stack frames (>= 2*MAX_FUEL headroom) |
 
-### Overflow / bound-exhaustion policy — LOCKED: saturate-to-error
+### 4.2 Overflow / bound-exhaustion policy — saturate-to-error
 
-When an operation would exceed a cap, options:
-- **(A recommended) Saturate-to-error**: return a defined `LIMIT_EXHAUSTED`
-  status (the analogue of the model's fuel=0 -> `None`), surfaced to the host as a
-  hard failure — never silent wraparound. Keeps the "no undefined behaviour" and
-  "explicit error return" JPL spirit and matches the existing truncation semantics.
-- **(B) Modular wraparound**: simpler but can mask truncation; risks diverging
-  from the verified model on out-of-budget inputs.
+When an operation would exceed a cap, it returns a defined `LIMIT_EXHAUSTED`
+status (the analogue of the model's fuel=0 -> `None`), surfaced to the host as a
+hard failure — never silent wraparound. This keeps the "no undefined behaviour"
+and "explicit error return" JPL spirit and matches the existing truncation
+semantics. The carrier is `bres A = BOk A | BLimit`, threaded through every bounded
+operation. The rejected alternative — modular wraparound — is simpler but can mask
+truncation and diverge from the verified model on out-of-budget inputs.
 
-LOCKED: **(A) saturate-to-error**, because the shell is safety-framed and
-truncation must be observable, not hidden.
-
-## Recursion elimination — the small-step machine
+## 5. Recursion elimination — the small-step machine
 
 The executor becomes a `step` function, tail-recursive over an explicit bounded
 stack (arrays, not a linked structure), iterated `fuel` times:
@@ -105,7 +175,7 @@ stack (arrays, not a linked structure), iterated `fuel` times:
 - Coq termination: measures on the (decreasing) fuel/index; still `Fixpoint`, but
   extraction yields a tail-recursive OCaml function -> a C `while`/`for`.
 
-## Extraction contract
+## 6. Extraction contract
 
 Coq (iterative, array-based, bounded) --Extraction--> OCaml (tail loops + fixed
 arrays) --simple emitter--> C99. The emitter only has to handle: tail
@@ -115,7 +185,7 @@ tagged-struct `cmd`; records->structs; `match`->`switch` (exhaustive, no default
 (all values are concrete after the array re-encoding), no closure conversion (the
 `phi` seam is data), no GC (static pools only).
 
-### Validated (live probe, 2026-10-03)
+### 6.1 Established extraction behaviour
 
 A fuel-bounded tail `Fixpoint` (`scan (f:nat) (l:list) (acc:list)` with the
 recursive call in tail position) extracts to OCaml `let rec scan f l acc = match f
@@ -127,7 +197,7 @@ C `while` (decrement `f`, exit on `O`) is sound. Two obligations for the model/e
 - Extraction keeps a custom `nat = O|S` and `list = Nil|Cons` (or native list under
   ExtrOcamlBasic); the emitter maps these to `uint32_t` and fixed-capacity arrays.
 
-## JPL lint gate (design)
+## 7. Verification: JPL lint gate (design)
 
 `verify/c/jpl_lint.sh` audits the emitted `sh_run.c`/`.h`:
 - static ban list via grep + clang: no `malloc|calloc|realloc|free`, no direct or
@@ -138,7 +208,7 @@ C `while` (decrement `f`, exit on `O`) is sound. Two obligations for the model/e
 - compile with `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion
   -pedantic -Werror`.
 
-## Differential gate (design)
+## 8. Verification: differential gate (design)
 
 `verify/c/` host supplies the real `phi` (fork/execvp/pipe/redirect, cd/exit/:)
 over the C kernel, then:
@@ -148,7 +218,7 @@ over the C kernel, then:
 Added to `verify_models.sh` / a new `verify/c/conformance.sh`; all prior gates
 (OCaml-free now, so: Coq properties x2, extraction parity, src conformance) stay green.
 
-## Sequencing (matches task list)
+## 9. Construction order (matches task list)
 
 JPL.1 this plan -> JPL.2 bounded data layer (.v, axiom-free) -> JPL.3 small-step
 machine + boundary lemmas -> JPL.3b two-sided machine equivalence (liveness,
@@ -156,7 +226,23 @@ axiom-free) -> JPL.4 extract iterative kernel + re-run 26 parity ->
 JPL.5 tail-loop OCaml->C99 emitter -> JPL.6 JPL lint gate -> JPL.7 C host +
 differential conformance.
 
-## JPL.2 — DONE (2026-10-03): verify/models/sh_jpl.v
+---
+
+## HISTORY — development record and hints
+
+Chronological record of dated decisions, build milestones, and live validation
+probes. Sections 1–9 above are the standing design; this section is how the design
+was built and what was verified empirically, kept so future work can trace the
+rationale without polluting the normative spec.
+
+### 2026-10-03 — decisions locked (provenance for §2, §4)
+
+- **Saturate-to-error** overflow policy chosen over modular wraparound (principle 5).
+- **Capacity defaults** (`MAX_*` in §4.1) confirmed as proposed.
+- Supersedes the earlier "transpile `sh_run.ml` directly" plan, which violated the
+  mandatory JPL rule set.
+
+### JPL.2 — DONE (2026-10-03): verify/models/sh_jpl.v
 
 `sh_jpl.v` is the bounded data layer, axiom-free (`coqchk -o -silent` → four
 `<none>`), built *alongside* `sh_concrete.v` (which it `Require Import`s only as
@@ -191,7 +277,7 @@ MAX_WORD) but the actual recursion-elimination — rewriting these into single
 tail loops over `bword`/`benv`, plus the `run` machine itself — is JPL.3's job.
 JPL.3 must preserve the §8 saturation behaviour and the §9 isomorphism Examples.
 
-## JPL.3 + JPL.3b — DONE (2026-10-03): verify/models/sh_jpl_run.v, sh_jpl_run_phase2.v
+### JPL.3 + JPL.3b — DONE (2026-10-03): verify/models/sh_jpl_run.v, sh_jpl_run_phase2.v
 
 `sh_jpl_run.v` is the bounded small-step machine, axiom-free (`coqchk -o -silent`
 → four `<none>`), built *alongside* `sh_concrete.v` and `sh_jpl.v` (it `Require
@@ -252,7 +338,7 @@ DEFERRED (documented, not silently dropped):
   with no self recursion — is JPL.5 work; JPL.3/JPL.4 fix the control-flow
   machine's contract that they must feed.
 
-## JPL.4 — DONE (2026-10-03): extract the iterative kernel + re-validate parity
+### JPL.4 — DONE (2026-10-03): extract the iterative kernel + re-validate parity
 
 Delivered the machine *as runnable code* and proved its OCaml behaviour
 isomorphic to the already-verified recursive kernel — all additive, no existing
@@ -281,7 +367,7 @@ artifact touched destructively.
   parity → run → assert): models gate is now **7/7 Coq+extraction checks**, with
   **26 recursive + 26 iterative parity checks** all green.
 
-## JPL.5 — PRECONDITION AUDIT (2026-10-03): emitter cannot yet run clean
+### JPL.5 — PRECONDITION AUDIT (2026-10-03): emitter cannot yet run clean
 
 JPL.5 is the "simple emitter" step, but the audit shows its stated precondition
 (the Extraction contract line: "OCaml (tail loops + fixed arrays)") is **not met**
@@ -351,7 +437,7 @@ the emitter can read as a bounded store (e.g. a length-carrying record over
 `Coq.Array`/`Vector`, or a documented cons→static-pool lowering the source
 provably bounds).  This is what (A) must settle in the Coq first.
 
-### JPL.5 path chosen: (A) root-cause the source (user, 2026-10-03)
+#### JPL.5 path chosen: (A) root-cause the source (user, 2026-10-03)
 
 The user selected (A): all *behavioral* transforms (tail-loop scans, phi-as-data)
 go into a new axiom-free Coq bounded-representation layer that is re-proven to
@@ -362,7 +448,7 @@ the original contract already granted it — the *layout* mapping (bounded `list
 static array + length, `nat`→`uint32`) justified by the Coq `wf_bword`/`wf_benv`
 bounds, which is representation, not semantics.
 
-### Validated toolchain probes (live, 2026-10-03) — de-risks (A)
+#### Validated toolchain probes (live, 2026-10-03) — de-risks (A)
 
 Two throwaway extraction probes (deleted) settled the load-bearing unknowns:
 
@@ -395,7 +481,7 @@ Two throwaway extraction probes (deleted) settled the load-bearing unknowns:
    cons-walking recursion is left for the emitter except the bounded `nth_error`
    it special-cases.
 
-### (A) sub-plan — prerequisite tasks before the emitter runs
+#### (A) sub-plan — prerequisite tasks before the emitter runs
 
 Additive: build alongside `sh_concrete.v` / `src/kernel/sh_run.ml` / `ush`, keep
 every existing gate green (invariant 3); the new artifacts are only wired into
@@ -421,7 +507,7 @@ every existing gate green (invariant 3); the new artifacts are only wired into
   parity checks against it (extend the harness) and re-vendor.  Only THEN does
   the JPL.5 emitter (#25) map `sh_run_c.ml` → JPL-clean C99.
 
-### Mandatory-Coq vs emitter-lowered (scope refinement, 2026-10-03)
+#### Mandatory-Coq vs emitter-lowered (scope refinement, 2026-10-03)
 
 Re-reading the extraction contract against the probes, the Coq-side rewrites
 split cleanly:
@@ -443,7 +529,7 @@ split cleanly:
   `Extract Constant` hooks (div-by-zero already guarded to `BLimit` by
   `b_divmod`) — folded into 5-A.5.
 
-## JPL.5-A.1 — DONE (2026-10-03): verify/models/sh_jpl_scan.v (bounded-word foundation)
+### JPL.5-A.1 — DONE (2026-10-03): verify/models/sh_jpl_scan.v (bounded-word foundation)
 
 `sh_jpl_scan.v` is the bounded-word foundation for the clean extraction,
 axiom-free (`coqchk -o -silent` → four `<none>`), built *alongside* `sh_concrete.v`
