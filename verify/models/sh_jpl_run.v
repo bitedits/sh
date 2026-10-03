@@ -25,14 +25,17 @@
  *     which the host services between steps.  `mloop` here folds `phi` back in
  *     at the effect sites purely so the equivalence to `run` can be stated.
 
- * Scope note (JPL_C_PLAN.md): this file delivers the control-flow machine, the
+ * Scope note (JPL.md): this file delivers the control-flow machine, the
  * specification, and FULL soundness over the entire control surface
  * (Skip/Ext/Assign/Seq/And/Or/Bang/If/While/For/Case).  The liveness half — a
- * proved step budget (steps_bound) that makes mloop reach the sound answer for
- * every in-budget input, needed to turn soundness into a two-sided iff — plus
- * making the scan helpers (expand/glob) themselves iterative are the JPL.3b
- * follow-on; the 26 extraction-parity checks and the /bin-sh conformance corpus
- * are the empirical net for those until the bound proof lands.
+ * well-founded step budget that makes mloop reach the sound answer for every
+ * input run accepts, turning soundness into a two-sided iff — is proved in the
+ * companion module sh_jpl_run_phase2.v (JPL.3b), which imports this file and
+ * adds ONLY the termination argument plus mrun_live / mloop_iff /
+ * mloop_sound_complete.  Making the scan helpers (expand/glob) themselves
+ * iterative remains follow-on work for the extraction (JPL.4); the 26
+ * extraction-parity checks and the /bin-sh conformance corpus are the empirical
+ * net for that surface.
 
  * Build (Rocq >= 9.0):
  *   coqc sh_jpl_run.v

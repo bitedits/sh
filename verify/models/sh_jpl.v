@@ -24,7 +24,7 @@
  * around the fuel-bounded concrete functions: they fix the observable bounded
  * contract and its saturation behaviour, which the JPL.3 machine must preserve.
  *
- * Design invariants (JPL_C_PLAN.md):
+ * Design invariants (JPL.md):
  *   1. Axiom-free: coqchk -o -silent must report all four <none> lines.  No
  *      Axiom/Parameter/Admitted/admit anywhere below.
  *   2. Fixed-width unsigned naturals: a Coq nat here stands for a uint32_t in the
@@ -59,7 +59,7 @@ Require Import sh_concrete.
 Set Warnings "-register-all".
 
 (* ═══════════════════════════════════════════════════════════════════
-   §1  Capacity constants (LOCKED — JPL_C_PLAN.md, user 2026-10-03)
+   §1  Capacity constants (LOCKED — JPL.md, user 2026-10-03)
 
    These are the compile-time budgets the emitted C allocates against.  They
    are written as Coq nats but become #define uint32_t constants at the emitter;
