@@ -27,6 +27,8 @@ re-architecture that sits on top of it.
 - [7. Verification: JPL lint gate (design)](#7-verification-jpl-lint-gate-design)
 - [8. Verification: differential gate (design)](#8-verification-differential-gate-design)
 - [9. Construction order (matches task list)](#9-construction-order-matches-task-list)
+  - [9.1 Build order (No · Description · Files)](#91-build-order-no--description--files)
+  - [9.2 Stage accounting](#92-stage-accounting)
 - [HISTORY — development record and hints](#history--development-record-and-hints)
 
 ## Introduction
@@ -301,48 +303,67 @@ each stage's deliverable is a precondition for the next, so they are *stages*, n
 parallel tracks. Read an arrow `->` as "blocks". Task numbers (#N) refer to the
 project tracker; file names are the Coq/build artifacts the stage delivers.
 
-**Label scheme (decoded).** `JPL.<phase>` = a top-level pipeline phase (§9 table
-below). When a phase's precondition audit shows it cannot run on the current
-source, a **path** letter is appended — `JPL.5-A` = the chosen "root-cause the Coq
-source first" path for phase 5 (the alternative `B`, "transpile as-is", was
-rejected; see HISTORY). `<phase>-<path>.<stage>` = an ordered prerequisite stage
-*inside* that path, numbered in dependency order. So `5-A.1` is "stage 1 of the A
-path leading to phase JPL.5 (the emitter)".
+**Label scheme (decoded).** `JPL.<phase>` = a top-level pipeline phase. When a
+phase's precondition audit shows it cannot run on the current source, a **path**
+letter is appended — `JPL.5-A` = the chosen "root-cause the Coq source first" path
+for phase 5 (the alternative `B`, "transpile as-is", was rejected; see HISTORY).
+`<phase>-<path>.<stage>` = an ordered prerequisite stage *inside* that path,
+numbered in dependency order. So `5-A.1` is "stage 1 of the A path leading to phase
+JPL.5 (the emitter)". In the **No** column below, `#N` is the tracker task;
+**Files** lists the `.v`/`.ml` artifacts that stage reaches its goal through
+(*italics* = planned, not yet in the tree).
 
-### 9.1 Phases
+### 9.1 Build order (No · Description · Files)
 
-| Phase | Task | Deliverable | State |
-|---|---|---|---|
-| JPL.1 | #21 | this design plan (`JPL.md`) | DONE |
-| JPL.2 | #22 | bounded data layer, axiom-free — `sh_jpl.v` | DONE |
-| JPL.3 | #23 | small-step machine + boundary lemmas — `sh_jpl_run.v` | DONE |
-| JPL.3b | #28 | two-sided machine equivalence (liveness/completeness) — `sh_jpl_run_phase2.v` | DONE |
-| JPL.4 | #24 | extract iterative kernel + re-run 26 parity — `sh_extract_iter.v`, `sh_run_iter.ml` | DONE |
-| JPL.5-A | #29–#33 | **source-rearchitecture prerequisite stages** (§9.2 below) | IN PROGRESS |
-| JPL.5 | #25 | tail-loop OCaml → JPL-C99 emitter | BLOCKED on JPL.5-A |
-| JPL.6 | #26 | mechanical D-60411 *shall*-rule lint gate on emitted C | pending JPL.5 |
-| JPL.7 | #27 | C host + differential conformance (C99 == kernel == /bin/sh) | pending JPL.6 |
+| No | Description | Files (Coq `.v` / OCaml `.ml`) |
+|---|---|---|
+| JPL.1 · #21 | Design plan (this document) | *`JPL.md`* (doc, not code) |
+| JPL.2 · #22 | Bounded data layer: `bres`/`bword`/`benv`, saturate-to-error, fixed-width nat, `cmd_count` — agrees with `sh_concrete` §9 | `sh_jpl.v` ← `sh_concrete.v` |
+| JPL.3 · #23 | Small-step machine: frames-as-data, explicit continuation stack, non-recursive `step`, phi-folded tail driver `mloop`; soundness `mrun_sound`/`mrun_correct` | `sh_jpl_run.v` ← `sh_concrete.v`, `sh_jpl.v` |
+| JPL.3b · #28 | Liveness/completeness: well-founded `cfg_budget`, `mrun_live`, two-sided `mloop_iff`/`mloop_sound_complete` | `sh_jpl_run_phase2.v` ← `sh_jpl_run.v` |
+| JPL.4 · #24 | Extract iterative kernel + re-run 26 parity (mloop == run == literal) | `sh_extract_iter.v` → `sh_run_iter.ml`/`.mli`; vendored `src/kernel/sh_run_iter.ml`/`.mli`; parity `sh_run_iter_parity.ml`; gate `verify_models.sh` |
+| 5-A.1 · #29 | Bounded byte-array text `bt` (len-carrying, MAX_WORD) + `teqb`/`nat2text`/`expand`/`expand_*` as fuel-bounded tail loops; byte-agreement Examples | `sh_jpl_scan.v` ← `sh_concrete.v`, `sh_jpl.v` |
+| 5-A.2 · #30 | Tail-loop `getv`/`setv` over the `benv` array rep, agreeing with concrete `getv`/`setv` | *`sh_jpl_scan.v` (or new `sh_jpl_env.v`)* — pending |
+| 5-A.3 · #31 | Iterative `glob`/`match_any`: backtrack recursion → bounded forward scan `glob_it`/`match_any_iter`; isomorphism with concrete `glob` | `sh_jpl_scan.v` ← `sh_concrete.v`, `sh_jpl.v` |
+| 5-A.4 · #32 | **phi-as-data driver**: `mloop` returns `Oeffect` as data, takes **no** `phi` fn; host loop services seam + re-enters; soundness + completeness restated over the new driver | *`sh_jpl_run.v` restated (or new `sh_jpl_run_phase3.v`)* ← `sh_jpl_run_phase2.v` — pending (current) |
+| 5-A.5 · #33 | Clean extraction: `ExtrOcamlNatInt` + `Nat.div`/`mod`/`sub` hooks → all-tail-loop, uint32, length-bounded, closure-free kernel; re-run 26 parity, re-vendor | *`sh_extract_jpl_c.v`* → *`sh_run_c.ml`* ← `sh_jpl_run.v`/`sh_jpl_scan.v`; vendored *`src/kernel/sh_run_c.ml`* — pending |
+| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — BLOCKED on 5-A.5 |
+| JPL.6 · #26 | Mechanical D-60411 *shall*-rule lint gate on emitted C (`clang -std=c99 -Wall -Wextra -Wconversion -Werror` + static analyzer) | *`verify/c/jpl_lint.sh`* — pending |
+| JPL.7 · #27 | C host + differential conformance: C99 == extracted kernel == `/bin/sh` | *`verify/c/*`* + oracle `verify/src/conformance.sh`, `verify/src/cases` — pending |
 
-### 9.2 JPL.5-A stages (prerequisites before the emitter can run)
+Reference layers consumed above but not themselves stages: `sh_properties.v` (L1
+relational spec), `sh_concrete.v` (L2 single source of truth), and the recursive
+extraction `sh_extract.v` → `sh_run.ml` (vendored `src/kernel/sh_run.ml`, parity
+`sh_run_parity.ml`). The models gate `verify_models.sh` compiles + axiom-checks
+every `.v` row and runs both extraction blocks.
 
-Chosen path (A) after the JPL.5 precondition audit: move every *behavioral*
-transform into an axiom-free Coq bounded-representation layer, re-proven to agree
-with `sh_concrete.run` and re-running the 26 parity checks, so the emitter keeps
-only the mechanical *layout* duty (`list`→static array+len, `nat`→`uint32`). Additive
-throughout: existing gates stay green; new artifacts are wired into
-`verify_models.sh` as additional gates.
+### 9.2 Stage accounting
 
-| Stage | Task | Deliverable (Coq / artifact) | Depends on | State |
-|---|---|---|---|---|
-| 5-A.1 | #29 | bounded byte-array text `bt` (len-carrying, cap MAX_WORD); `teqb`/`nat2text`/`expand`/`expand_*` as fuel-bounded tail loops; isomorphism Examples vs `sh_concrete` — `sh_jpl_scan.v` | JPL.4 | DONE |
-| 5-A.2 | #30 | tail-loop `getv`/`setv` over the `benv` array rep, agreeing with concrete `getv`/`setv` | 5-A.1 | pending |
-| 5-A.3 | #31 | iterative `glob`/`match_any` (backtrack recursion → bounded forward scan); isomorphism with concrete `glob` — `sh_jpl_scan.v` | 5-A.1 | DONE |
-| 5-A.4 | #32 | **phi-as-data driver**: `mloop` returns the `Oeffect` as data and takes **no** `phi` function; a host loop services the seam and re-enters; JPL.3/3b soundness + completeness restated over the new driver | 5-A.3 | pending (current) |
-| 5-A.5 | #33 | extraction `sh_extract_jpl_c.v`: `ExtrOcamlNatInt` + `Nat.div`/`mod`/`sub` constant hooks → `sh_run_c.ml` (all tail loops + uint32 + length-bounded records + no closures); re-run 26 parity, re-vendor | 5-A.4 | pending |
+Progress rollup against §9.1. **A stage is DONE only if its `.v` passes
+`coqchk -o -silent` with the four `<none>` lines AND its empirical harness (parity /
+conformance) is green** — an assertion that cannot yet be built is recorded PENDING,
+never PASS. Update this table in the same edit that changes a stage's state; the
+tracker task status and this rollup must agree.
 
-When 5-A.1…5-A.5 are green, phase JPL.5 (#25) unblocks: the emitter maps
-`sh_run_c.ml` → JPL-clean C99, then JPL.6 (#26) lints it and JPL.7 (#27) runs it
-against the `/bin/sh` oracle.
+| Bucket | Stages | Count |
+|---|---|---|
+| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.3 | 7 |
+| 🔵 IN PROGRESS | 5-A.4 (#32) — phi-as-data driver | 1 |
+| ⏳ PENDING | 5-A.2 (#30), 5-A.5 (#33), JPL.5 (#25), JPL.6 (#26), JPL.7 (#27) | 5 |
+| **Total** | | **13** |
+
+**Current front:** 5-A.4 (#32). Critical-path to the emitter = 5-A.4 → 5-A.5 → JPL.5.
+5-A.2 (#30) is the one pending prerequisite *off* that front (env tail loops); it is
+independent of 5-A.4 and can be taken any time before 5-A.5 folds it in.
+
+**Verification state (the empirical net that makes DONE credible):**
+
+| Check | Status | Where |
+|---|---|---|
+| Models gate (coqc + coqchk ×6 + 2 extraction blocks) | **8/8 green** | `verify_models.sh` |
+| Extraction parity (recursive + iterative) | 26 + 26 | `sh_run_parity.ml`, `sh_run_iter_parity.ml` |
+| Axiom-freedom (every `.v`) | four `<none>` | `coqchk -o -silent` |
+| POSIX conformance vs `/bin/sh` | 33/33 | `verify/src/conformance.sh` |
 
 > Rationale, provenance and the live toolchain probes behind path (A) are the
 > dated record in
