@@ -30,5 +30,8 @@ Set Extraction Output Directory ".".
 (* Recursively extract the executable surface.  `run` drags in its mutual
    helpers (run_seq / run_for / run_case) and, through them, the expander and the
    globber; expand and glob are named explicitly so the fidelity harness can also
-   call them directly rather than only through run. *)
-Extraction "sh_run" run expand glob.
+   call them directly rather than only through run.  pure_phi is the model's own
+   command seam: extracting it lets the fidelity harness drive run with exactly
+   the verified leaf, and lets the Phase 3d host see the seam's shape it must
+   replace with the real fork/exec callback. *)
+Extraction "sh_run" run pure_phi expand glob.

@@ -51,7 +51,7 @@ let state ?(status = 0) ?(env : env = []) () : cstate =
   { cstatus = nat_of_int status; cenv = env_to_text env }
 
 let skip = Skip
-let ext w = Ext (text_of_string w)
+let ext w = Ext (O, [ text_of_string w ])
 let assign k v = Assign (text_of_string k, text_of_string v)
 let seq a b = Seq (a, b)
 let and_ a b = And (a, b)
@@ -65,9 +65,10 @@ let case_ s brs =
   Case (text_of_string s,
         List.map (fun (ps, b) -> (List.map text_of_string ps, b)) brs)
 
-(* run a command under a fuel budget; None means the budget ran out first *)
+(* run a command under a fuel budget through the model's own pure seam; None
+   means the budget ran out first *)
 let value fuel c (s : cstate) : obs option =
-  match Sh_run.run (nat_of_int fuel) c s with
+  match Sh_run.run Sh_run.pure_phi (nat_of_int fuel) c s with
   | None -> None
   | Some s' -> Some (observe s')
 

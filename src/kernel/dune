@@ -1,0 +1,9 @@
+; Vendored Coq Extraction of verify/models/sh_concrete.v (single source of truth).
+; DO NOT EDIT BY HAND — regenerated from the .v model and byte-checked against a
+; fresh extraction by verify_models.sh.  wrapped=false exposes the extracted
+; module directly as Sh_run; warnings are silenced because generated code is not
+; ours to lint.
+(library
+ (name sh_kernel)
+ (wrapped false)
+ (flags (:standard -w -a)))

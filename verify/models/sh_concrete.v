@@ -150,26 +150,31 @@ Definition false_w : text := [102; 97; 108; 115; 101].
 (* The status a bare external command yields.  Verified model keeps this pure:
    recognised builtins map to their codes, an unknown command is 127.  The C
    extraction replaces these constant arms with the wait status of the real
-   fork/execvp at the single command seam. *)
-Definition ex_status (name : text) : nat :=
+   fork/execvp at the single command seam.
+
+   The seam also receives the shell state so the extracted host can resolve
+   `$var`/`$?` against the live environment when it forks the real command.
+   The verified arms ignore it (status depends only on the name), which keeps
+   every §6/§9 proof about `run` state-independent at the Ext nodes. *)
+Definition ex_status (name : text) (_ : cstate) : nat :=
   if teqb name true_w then 0
   else if teqb name false_w then 1
   else 127.
 
-Lemma ex_status_true : ex_status true_w = 0.
-Proof. unfold ex_status. rewrite teqb_refl. reflexivity. Qed.
+Lemma ex_status_true : forall s, ex_status true_w s = 0.
+Proof. intros s. unfold ex_status. rewrite teqb_refl. reflexivity. Qed.
 
-Lemma ex_status_false : ex_status false_w = 1.
+Lemma ex_status_false : forall s, ex_status false_w s = 1.
 Proof.
-  unfold ex_status.
+  intros s. unfold ex_status.
   assert (Ht : teqb false_w true_w = false).
   { simpl. destruct (Nat.eqb 102 116); reflexivity. }
   rewrite Ht. rewrite teqb_refl. reflexivity.
 Qed.
 
-Lemma ex_status_unknown : forall n, n <> true_w -> n <> false_w -> ex_status n = 127.
+Lemma ex_status_unknown : forall n s, n <> true_w -> n <> false_w -> ex_status n s = 127.
 Proof.
-  intros n H1 H2. unfold ex_status.
+  intros n s H1 H2. unfold ex_status.
   destruct (teqb n true_w) eqn:E1; [ | idtac ].
   - exfalso. apply H1. apply teqb_true_eq; exact E1.
   - destruct (teqb n false_w) eqn:E2.
@@ -307,10 +312,25 @@ Fixpoint match_any (f : nat) (pats : list text) (scrut : text) : bool :=
    §6  Concrete commands and the fuel-bounded functional semantics
    ═══════════════════════════════════════════════════════════════════ *)
 
+(* The command seam is a single callback, `phi`.  run never performs OS effects
+   itself: at an Ext leaf it hands (idx, argv, state) to phi, which returns the
+   successor state (the command's status plus any shell-visible effect).  The
+   verified model fixes phi to the pure `pure_phi`; the extracted host passes its
+   real fork/exec/pipe/redirect seam in its place — the single point where the
+   verified engine meets the operating system (Phase 3d). *)
+Definition run_phi : Type := nat -> list text -> cstate -> option cstate.
+
 Inductive cmd : Type :=
   | Skip                          (* empty command: state unchanged *)
-  | Ext  (name : text)            (* external command / builtin (already expanded) *)
-  | Assign (k v : text)           (* name=value prefix assignment (value already expanded) *)
+  | Ext  (idx : nat) (argv : list text)
+      (* one external-command seam node.  argv are the command's words, already
+         run through the single extracted expander by the lowering bridge, so
+         word expansion stays single-sourced and the leaf's status depends only
+         on the (expanded) command word — never on the recursion fuel.  idx is an
+         opaque key the extracted host uses to recover the surrounding OS effects
+         (redirects, pipeline role, subshell) that the pure semantics does not
+         model.  The node delegates entirely to phi. *)
+  | Assign (k v : text)           (* name=value prefix assignment (value pre-expanded by the bridge) *)
   | Seq  (c1 c2 : cmd)            (* c1 ; c2 *)
   | And  (c1 c2 : cmd)            (* c1 && c2 *)
   | Or   (c1 c2 : cmd)            (* c1 || c2 *)
@@ -327,62 +347,74 @@ Definition obind {A B : Type} (x : option A) (f : A -> option B) : option B :=
   | None => None
   end.
 
-(* run f c s — the executable reading of a command.  Fuel is consumed only at
-   compound nodes; atomic commands run at every fuel level.  run, run_seq,
-   run_for, run_case and match_any form one mutual group, all decreasing on the
-   leading fuel argument, so the kernel accepts them as safe fixpoints. *)
-Fixpoint run (f : nat) (c : cmd) (s : cstate) : option cstate :=
+(* Pure reading of the seam, used by the verified model.  The command's status is
+   ex_status of its expanded head word; the environment is left unchanged (an
+   external command does not mutate shell variables).  An empty argv — a bare
+   redirect or an assignment-only command — yields status 0.  This mirrors the
+   pre-seam behaviour exactly, so every §7/§9 status fact is preserved. *)
+Definition pure_phi (_ : nat) (argv : list text) (s : cstate) : option cstate :=
+  match argv with
+  | [] => Some (CS 0 (cenv s))
+  | w :: _ => Some (CS (nstat (ex_status w s)) (cenv s))
+  end.
+
+(* run phi f c s — the executable reading of a command, parameterised by the seam
+   phi.  Fuel is consumed only at compound nodes; atomic commands run at every
+   fuel level.  run, run_seq, run_for and run_case form one mutual group, all
+   decreasing on the fuel argument (the second, after the constant phi), so the
+   kernel accepts them as safe fixpoints. *)
+Fixpoint run (phi : run_phi) (f : nat) (c : cmd) (s : cstate) : option cstate :=
   match f with
   | 0 =>
       match c with
       | Skip => Some s
-      | Ext n => Some (CS (nstat (ex_status n)) (cenv s))
+      | Ext idx argv => phi idx argv s
       | Assign k v => Some (CS 0 (setv k v (cenv s)))
       | _ => None
       end
   | S f' =>
       match c with
       | Skip => Some s
-      | Ext n => Some (CS (nstat (ex_status n)) (cenv s))
+      | Ext idx argv => phi idx argv s
       | Assign k v => Some (CS 0 (setv k v (cenv s)))
       | Bang c =>
-          obind (run f' c s) (fun s1 => Some (CS (bstat (cstatus s1)) (cenv s1)))
+          obind (run phi f' c s) (fun s1 => Some (CS (bstat (cstatus s1)) (cenv s1)))
       | Seq c1 c2 =>
-          obind (run f' c1 s) (run f' c2)
+          obind (run phi f' c1 s) (run phi f' c2)
       | And c1 c2 =>
-          obind (run f' c1 s)
-            (fun s1 => if Nat.eqb (cstatus s1) 0 then run f' c2 s1 else Some s1)
+          obind (run phi f' c1 s)
+            (fun s1 => if Nat.eqb (cstatus s1) 0 then run phi f' c2 s1 else Some s1)
       | Or c1 c2 =>
-          obind (run f' c1 s)
-            (fun s1 => if Nat.eqb (cstatus s1) 0 then Some s1 else run f' c2 s1)
+          obind (run phi f' c1 s)
+            (fun s1 => if Nat.eqb (cstatus s1) 0 then Some s1 else run phi f' c2 s1)
       | If cond t e =>
-          obind (run f' cond s)
-            (fun sc => if Nat.eqb (cstatus sc) 0 then run f' t sc else run f' e sc)
+          obind (run phi f' cond s)
+            (fun sc => if Nat.eqb (cstatus sc) 0 then run phi f' t sc else run phi f' e sc)
       | While cond body =>
-          obind (run f' cond s)
+          obind (run phi f' cond s)
             (fun sc =>
                if Nat.eqb (cstatus sc) 0
-               then obind (run f' body sc) (run f' (While cond body))
+               then obind (run phi f' body sc) (run phi f' (While cond body))
                else Some sc)
       | For var ws body =>
-          run_for f' var ws body s
+          run_for phi f' var ws body s
       | Case scrut brs =>
-          run_case f' scrut brs s
+          run_case phi f' scrut brs s
       end
   end
 
-with run_seq (f : nat) (cmds : list cmd) (s : cstate) : option cstate :=
+with run_seq (phi : run_phi) (f : nat) (cmds : list cmd) (s : cstate) : option cstate :=
   match f with
   | 0 => None
   | S f' =>
       match cmds with
       | [] => Some (CS 0 (cenv s))
-      | [c] => run f' c s
-      | c :: c2 :: r => obind (run f' c s) (run_seq f' (c2 :: r))
+      | [c] => run phi f' c s
+      | c :: c2 :: r => obind (run phi f' c s) (run_seq phi f' (c2 :: r))
       end
   end
 
-with run_for (f : nat) (var : text) (ws : list text) (body : list cmd) (s : cstate) : option cstate :=
+with run_for (phi : run_phi) (f : nat) (var : text) (ws : list text) (body : list cmd) (s : cstate) : option cstate :=
   match f with
   | 0 => None
   | S f' =>
@@ -390,14 +422,14 @@ with run_for (f : nat) (var : text) (ws : list text) (body : list cmd) (s : csta
       | [] => Some (CS 0 (cenv s))
       | [w] =>
           let s1 := CS (cstatus s) (setv var (expand f' (cenv s) (cstatus s) w) (cenv s)) in
-          run_seq f' body s1
+          run_seq phi f' body s1
       | w :: w2 :: r =>
           let s1 := CS (cstatus s) (setv var (expand f' (cenv s) (cstatus s) w) (cenv s)) in
-          obind (run_seq f' body s1) (run_for f' var (w2 :: r) body)
+          obind (run_seq phi f' body s1) (run_for phi f' var (w2 :: r) body)
       end
   end
 
-with run_case (f : nat) (scrut : text) (brs : list (list text * list cmd)) (s : cstate) : option cstate :=
+with run_case (phi : run_phi) (f : nat) (scrut : text) (brs : list (list text * list cmd)) (s : cstate) : option cstate :=
   match f with
   | 0 => None
   | S f' =>
@@ -405,31 +437,34 @@ with run_case (f : nat) (scrut : text) (brs : list (list text * list cmd)) (s : 
       | [] => Some (CS 0 (cenv s))
       | (pats, body) :: r =>
           if match_any f' pats (expand f' (cenv s) (cstatus s) scrut)
-          then run_seq f' body s
-          else run_case f' scrut r s
+          then run_seq phi f' body s
+          else run_case phi f' scrut r s
       end
   end.
 
 (* ── atomic readings ─────────────────────────────────────────────── *)
 
-Lemma run_skip : forall f s, run f Skip s = Some s.
-Proof. intros f s; destruct f; reflexivity. Qed.
+Lemma run_skip : forall phi f s, run phi f Skip s = Some s.
+Proof. intros phi f s; destruct f; reflexivity. Qed.
 
-Lemma run_ext_true : forall f s, run f (Ext true_w) s = Some (CS 0 (cenv s)).
+Lemma run_ext_true : forall f idx s, run pure_phi f (Ext idx [true_w]) s = Some (CS 0 (cenv s)).
 Proof.
-  intros f s; destruct f; simpl; rewrite ex_status_true;
+  intros f idx s; destruct f; simpl; rewrite ex_status_true;
   replace (0 mod 256) with 0 by reflexivity; reflexivity.
 Qed.
 
-Lemma run_ext_false : forall f s, run f (Ext false_w) s = Some (CS 1 (cenv s)).
+Lemma run_ext_false : forall f idx s, run pure_phi f (Ext idx [false_w]) s = Some (CS 1 (cenv s)).
 Proof.
-  intros f s; destruct f; simpl; rewrite ex_status_false;
+  intros f idx s; destruct f; simpl; rewrite ex_status_false;
   replace (1 mod 256) with 1 by reflexivity; reflexivity.
 Qed.
 
-Lemma run_assign : forall f k v s,
-  run f (Assign k v) s = Some (CS 0 (setv k v (cenv s))).
-Proof. intros f k v s; destruct f; reflexivity. Qed.
+Lemma run_ext_empty : forall f idx s, run pure_phi f (Ext idx []) s = Some (CS 0 (cenv s)).
+Proof. intros f idx s; destruct f; reflexivity. Qed.
+
+Lemma run_assign : forall phi f k v s,
+  run phi f (Assign k v) s = Some (CS 0 (setv k v (cenv s))).
+Proof. intros phi f k v s; destruct f; reflexivity. Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
    §7  Control-flow boundary laws (the src/ conformance surface)
@@ -437,8 +472,11 @@ Proof. intros f k v s; destruct f; reflexivity. Qed.
 
 (* && short-circuits: a failing left operand stops the list and the right never
    runs, so the state is exactly the left command's result. *)
+(* All boundary laws below are stated for the verified model's own seam,
+   `pure_phi`; the extracted host swaps in a real seam without touching these
+   laws.  Ext now carries (idx, argv), so the leaf is `Ext 0 [word]`. *)
 Lemma and_left_false_stops :
-  forall c2 s0 f, run (S f) (And (Ext false_w) c2) s0 = Some (CS 1 (cenv s0)).
+  forall c2 s0 f, run pure_phi (S f) (And (Ext 0 [false_w]) c2) s0 = Some (CS 1 (cenv s0)).
 Proof.
   intros c2 s0 f. cbn [run obind]. rewrite run_ext_false.
   cbn [obind cstatus]. reflexivity.
@@ -446,7 +484,7 @@ Qed.
 
 (* || short-circuits: a succeeding left operand stops the list. *)
 Lemma or_left_true_stops :
-  forall c2 s0 f, run (S f) (Or (Ext true_w) c2) s0 = Some (CS 0 (cenv s0)).
+  forall c2 s0 f, run pure_phi (S f) (Or (Ext 0 [true_w]) c2) s0 = Some (CS 0 (cenv s0)).
 Proof.
   intros c2 s0 f. cbn [run obind]. rewrite run_ext_true.
   cbn [obind]. reflexivity.
@@ -454,18 +492,18 @@ Qed.
 
 (* ; is right-sequential: the list status is the last command's status. *)
 Lemma seq_last_status_and :
-  forall c1 c2 s0 f s1 s2,
-  run f c1 s0 = Some s1 -> run f c2 s1 = Some s2 ->
-  run (S f) (Seq c1 c2) s0 = Some s2.
+  forall phi c1 c2 s0 f s1 s2,
+  run phi f c1 s0 = Some s1 -> run phi f c2 s1 = Some s2 ->
+  run phi (S f) (Seq c1 c2) s0 = Some s2.
 Proof.
-  intros c1 c2 s0 f s1 s2 H1 H2.
+  intros phi c1 c2 s0 f s1 s2 H1 H2.
   cbn [run]. rewrite H1. cbn [obind]. rewrite H2. reflexivity.
 Qed.
 
 (* while with an immediately-failing test runs its body zero times and keeps the
    test's status. *)
 Lemma while_false_zero :
-  forall body s0 f, run (S f) (While (Ext false_w) body) s0 = Some (CS 1 (cenv s0)).
+  forall body s0 f, run pure_phi (S f) (While (Ext 0 [false_w]) body) s0 = Some (CS 1 (cenv s0)).
 Proof.
   intros body s0 f. cbn [run obind]. rewrite run_ext_false.
   cbn [obind cstatus]. reflexivity.
@@ -473,14 +511,14 @@ Qed.
 
 (* ! inverts a command's zero/non-zero status, leaving the environment alone. *)
 Lemma bang_inverts_false :
-  forall s0 f, run (S f) (Bang (Ext false_w)) s0 = Some (CS 0 (cenv s0)).
+  forall s0 f, run pure_phi (S f) (Bang (Ext 0 [false_w])) s0 = Some (CS 0 (cenv s0)).
 Proof.
   intros s0 f. cbn [run obind]. rewrite run_ext_false.
   cbn [obind]. unfold bstat. reflexivity.
 Qed.
 
 Lemma bang_inverts_true :
-  forall s0 f, run (S f) (Bang (Ext true_w)) s0 = Some (CS 1 (cenv s0)).
+  forall s0 f, run pure_phi (S f) (Bang (Ext 0 [true_w])) s0 = Some (CS 1 (cenv s0)).
 Proof.
   intros s0 f. cbn [run obind]. rewrite run_ext_true.
   cbn [obind]. unfold bstat. reflexivity.
@@ -490,7 +528,7 @@ Qed.
    then-branch, in the environment the test left behind (status 0). *)
 Lemma if_true_takes_then :
   forall t e s0 f,
-  run (S f) (If (Ext true_w) t e) s0 = run f t (CS 0 (cenv s0)).
+  run pure_phi (S f) (If (Ext 0 [true_w]) t e) s0 = run pure_phi f t (CS 0 (cenv s0)).
 Proof.
   intros t e s0 f. cbn [run obind]. rewrite run_ext_true.
   cbn [obind]. reflexivity.
@@ -499,7 +537,7 @@ Qed.
 (* a failing test runs the else-branch. *)
 Lemma if_false_takes_else :
   forall t e s0 f,
-  run (S f) (If (Ext false_w) t e) s0 = run f e (CS 1 (cenv s0)).
+  run pure_phi (S f) (If (Ext 0 [false_w]) t e) s0 = run pure_phi f e (CS 1 (cenv s0)).
 Proof.
   intros t e s0 f. cbn [run obind]. rewrite run_ext_false.
   cbn [obind]. reflexivity.
@@ -508,13 +546,13 @@ Qed.
 (* An assignment binds its value: reading the key back from the resulting
    environment yields v, at every fuel level. *)
 Lemma assign_binds :
-  forall k v s0 f,
-  match run f (Assign k v) s0 with
+  forall phi k v s0 f,
+  match run phi f (Assign k v) s0 with
   | Some s => getv k (cenv s) = Some v
   | None => True
   end.
 Proof.
-  intros k v s0 f; destruct f; cbn; apply getv_set_same.
+  intros phi k v s0 f; destruct f; cbn; apply getv_set_same.
 Qed.
 
 (* Assignments are isolated: binding one name leaves another distinct name's
@@ -522,7 +560,7 @@ Qed.
 Lemma assign_isolated :
   forall k k2 v s0,
   teqb k2 k = false ->
-  match run 1 (Assign k v) s0 with
+  match run pure_phi 1 (Assign k v) s0 with
   | Some s => getv k2 (cenv s) = getv k2 (cenv s0)
   | None => True
   end.
@@ -577,37 +615,38 @@ Proof. reflexivity. Qed.
 
 (* for x in a b: the loop leaves x bound to the last word, status 0. *)
 Example for_binds_last :
-  run 6 (For [120] [[97]; [98]] [Skip]) (CS 0 []) = Some (CS 0 [([120], [98])]).
+  run pure_phi 6 (For [120] [[97]; [98]] [Skip]) (CS 0 []) = Some (CS 0 [([120], [98])]).
 Proof. reflexivity. Qed.
 
 (* for over an empty word list runs the body zero times and returns 0. *)
 Example for_empty :
-  run 3 (For [120] [] [Ext false_w]) (CS 5 []) = Some (CS 0 []).
+  run pure_phi 3 (For [120] [] [Ext 0 [false_w]]) (CS 5 []) = Some (CS 0 []).
 Proof. reflexivity. Qed.
 
 (* case: the first matching pattern's body runs; 'a' matches pattern 'a'.
    Each branch carries a LIST of alternative glob patterns; here one each. *)
 Example case_first_match :
-  run 6 (Case [97] [([[97]], [Ext false_w]); ([[42]], [Ext true_w])]) (CS 0 [])
+  run pure_phi 6 (Case [97] [([[97]], [Ext 0 [false_w]]); ([[42]], [Ext 0 [true_w]])]) (CS 0 [])
   = Some (CS 1 []).
 Proof. reflexivity. Qed.
 
 (* case: 'a' does not match 'b', so the '*' (match-all) branch runs. *)
 Example case_star_fallback :
-  run 6 (Case [97] [([[98]], [Ext false_w]); ([[42]], [Ext true_w])]) (CS 0 [])
+  run pure_phi 6 (Case [97] [([[98]], [Ext 0 [false_w]]); ([[42]], [Ext 0 [true_w]])]) (CS 0 [])
   = Some (CS 0 []).
 Proof. reflexivity. Qed.
 
 (* case with no matching branch leaves status 0. *)
 Example case_no_match :
-  run 6 (Case [97] [([[98]], [Ext false_w])]) (CS 0 []) = Some (CS 0 []).
+  run pure_phi 6 (Case [97] [([[98]], [Ext 0 [false_w]])]) (CS 0 []) = Some (CS 0 []).
 Proof. reflexivity. Qed.
 
 (* for over one word expands that word against the live environment before
    binding the loop variable: with a=9 in scope, `for x in $a` binds x to 9.
-   (Ext/Assign words are pre-expanded by the parser bridge, so the for-loop's
-   own word-list expansion is the read-back demonstrated here.) *)
+   run_for expands the loop's own word list with the single extracted expander;
+   the Ext/Assign command words are expanded by the lowering bridge with that
+   same expander before they are handed to run. *)
 Example for_expands_word :
-  run 6 (For [120] [[36; 97]] [Skip]) (CS 0 [([97], [57])])
+  run pure_phi 6 (For [120] [[36; 97]] [Skip]) (CS 0 [([97], [57])])
   = Some (CS 0 [([97], [57]); ([120], [57])]).
 Proof. reflexivity. Qed.

@@ -4,9 +4,9 @@ version: "1.4.0"
 maintainer: "Namdak Tonpa <maxim@synrc.com>"
 authors: [ "Groupoid Infinity" ]
 homepage: "https://sh.5ht.co/"
-bug-reports: "https://github.com/BitEdits/sh/issues"
-dev-repo: "https://github.com/BitEdits/sh"
-synopsis: "POSIX Micro Shell"
+bug-reports: "https://github.com/bitedits/sh/issues"
+dev-repo: "https://github.com/bitedits/sh"
+synopsis: "POSIX Verified Shell"
 license: "ISC"
 depends: [
   "dune" {>= "2.9"}

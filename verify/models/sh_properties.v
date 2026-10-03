@@ -1,12 +1,13 @@
 (* sh_properties.v
  *
- * Formal verification of the POSIX shell list/control-flow semantics that
- * sh_model.ml executes.  The whole model here is *relational*: a command's
+ * Formal verification of the POSIX shell list/control-flow semantics that the
+ * extracted kernel (sh_concrete.v -> sh_run.ml) executes.  The whole model here
+ * is *relational*: a command's
  * meaning is an inductive proposition  exec c s0 f s  ("running c in state s0
  * with fuel budget f terminates in state s1").  There are no fixpoints and no
  * axioms, so every theorem below is checked by the Rocq kernel alone.
  *
- * What is captured faithfully from sh_model.ml:
+ * What is captured faithfully from the concrete model:
  *  - status is truncated to its low 8 bits   (norm n = n land 255 <-> n mod 256)
  *  - && short-circuits on a non-zero left, || on a zero left
  *  - ; never short-circuits; the list status is that of the last command
@@ -28,7 +29,7 @@ From Stdlib Require Import PeanoNat.
 Import ListNotations.
 
 (* A shell variable is a nat key holding a nat value in this abstract model;
-   the keys stand for the names sh_model.ml keeps in its env table. *)
+   the keys stand for the names the concrete kernel keeps in its env table. *)
 
 (* ═══════════════════════════════════════════════════════════════════
    §1  States, status normalisation and the variable store
