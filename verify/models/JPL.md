@@ -296,11 +296,59 @@ Added to `verify_models.sh` / a new `verify/c/conformance.sh`; all prior gates
 
 ## 9. Construction order (matches task list)
 
-JPL.1 this plan -> JPL.2 bounded data layer (.v, axiom-free) -> JPL.3 small-step
-machine + boundary lemmas -> JPL.3b two-sided machine equivalence (liveness,
-axiom-free) -> JPL.4 extract iterative kernel + re-run 26 parity ->
-JPL.5 tail-loop OCaml->C99 emitter -> JPL.6 JPL lint gate -> JPL.7 C host +
-differential conformance.
+This is the **normative build order**: a strictly sequential dependency chain —
+each stage's deliverable is a precondition for the next, so they are *stages*, not
+parallel tracks. Read an arrow `->` as "blocks". Task numbers (#N) refer to the
+project tracker; file names are the Coq/build artifacts the stage delivers.
+
+**Label scheme (decoded).** `JPL.<phase>` = a top-level pipeline phase (§9 table
+below). When a phase's precondition audit shows it cannot run on the current
+source, a **path** letter is appended — `JPL.5-A` = the chosen "root-cause the Coq
+source first" path for phase 5 (the alternative `B`, "transpile as-is", was
+rejected; see HISTORY). `<phase>-<path>.<stage>` = an ordered prerequisite stage
+*inside* that path, numbered in dependency order. So `5-A.1` is "stage 1 of the A
+path leading to phase JPL.5 (the emitter)".
+
+### 9.1 Phases
+
+| Phase | Task | Deliverable | State |
+|---|---|---|---|
+| JPL.1 | #21 | this design plan (`JPL.md`) | DONE |
+| JPL.2 | #22 | bounded data layer, axiom-free — `sh_jpl.v` | DONE |
+| JPL.3 | #23 | small-step machine + boundary lemmas — `sh_jpl_run.v` | DONE |
+| JPL.3b | #28 | two-sided machine equivalence (liveness/completeness) — `sh_jpl_run_phase2.v` | DONE |
+| JPL.4 | #24 | extract iterative kernel + re-run 26 parity — `sh_extract_iter.v`, `sh_run_iter.ml` | DONE |
+| JPL.5-A | #29–#33 | **source-rearchitecture prerequisite stages** (§9.2 below) | IN PROGRESS |
+| JPL.5 | #25 | tail-loop OCaml → JPL-C99 emitter | BLOCKED on JPL.5-A |
+| JPL.6 | #26 | mechanical D-60411 *shall*-rule lint gate on emitted C | pending JPL.5 |
+| JPL.7 | #27 | C host + differential conformance (C99 == kernel == /bin/sh) | pending JPL.6 |
+
+### 9.2 JPL.5-A stages (prerequisites before the emitter can run)
+
+Chosen path (A) after the JPL.5 precondition audit: move every *behavioral*
+transform into an axiom-free Coq bounded-representation layer, re-proven to agree
+with `sh_concrete.run` and re-running the 26 parity checks, so the emitter keeps
+only the mechanical *layout* duty (`list`→static array+len, `nat`→`uint32`). Additive
+throughout: existing gates stay green; new artifacts are wired into
+`verify_models.sh` as additional gates.
+
+| Stage | Task | Deliverable (Coq / artifact) | Depends on | State |
+|---|---|---|---|---|
+| 5-A.1 | #29 | bounded byte-array text `bt` (len-carrying, cap MAX_WORD); `teqb`/`nat2text`/`expand`/`expand_*` as fuel-bounded tail loops; isomorphism Examples vs `sh_concrete` — `sh_jpl_scan.v` | JPL.4 | DONE |
+| 5-A.2 | #30 | tail-loop `getv`/`setv` over the `benv` array rep, agreeing with concrete `getv`/`setv` | 5-A.1 | pending |
+| 5-A.3 | #31 | iterative `glob`/`match_any` (backtrack recursion → bounded forward scan); isomorphism with concrete `glob` — `sh_jpl_scan.v` | 5-A.1 | DONE |
+| 5-A.4 | #32 | **phi-as-data driver**: `mloop` returns the `Oeffect` as data and takes **no** `phi` function; a host loop services the seam and re-enters; JPL.3/3b soundness + completeness restated over the new driver | 5-A.3 | pending (current) |
+| 5-A.5 | #33 | extraction `sh_extract_jpl_c.v`: `ExtrOcamlNatInt` + `Nat.div`/`mod`/`sub` constant hooks → `sh_run_c.ml` (all tail loops + uint32 + length-bounded records + no closures); re-run 26 parity, re-vendor | 5-A.4 | pending |
+
+When 5-A.1…5-A.5 are green, phase JPL.5 (#25) unblocks: the emitter maps
+`sh_run_c.ml` → JPL-clean C99, then JPL.6 (#26) lints it and JPL.7 (#27) runs it
+against the `/bin/sh` oracle.
+
+> Rationale, provenance and the live toolchain probes behind path (A) are the
+> dated record in
+> [HISTORY — development record and hints](#history--development-record-and-hints)
+> ("JPL.5 — PRECONDITION AUDIT", "JPL.5 path chosen: (A)", the `5-A.*` notes). This
+> section is the normative dependency chain; HISTORY is why it is shaped this way.
 
 ---
 
