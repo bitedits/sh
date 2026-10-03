@@ -1,9 +1,9 @@
 # JPL-Compliant C99 Extraction — Design Specification
 
 **Scope.** Governing design reference for Phase 3d-C: produce a C99 kernel whose
-emitted form satisfies the **mandatory NASA JPL PowerPC C rule set**, while keeping
+emitted form satisfies the **JPL D-60411 *shall* rules (LOC-1…LOC-4)**, while keeping
 every *semantic* transform inside the verified Coq model. The Introduction motivates
-the NASA JPL standard and its three-category structure; Sections 1–9 state the
+the NASA JPL standard and its Levels-of-Compliance structure; Sections 1–9 state the
 standing design (principles, compliance contract, bounded representation, machine
 architecture, extraction contract, verification strategy, construction order). Dated
 decisions, build milestones, and live validation probes are quarantined under
@@ -17,7 +17,7 @@ re-architecture that sits on top of it.
 - [Introduction](#introduction) — motivation and structure of the NASA JPL standard
 - [1. Problem: why re-architecture (not direct emit)](#1-problem-why-re-architecture-not-direct-emit)
 - [2. Design principles (invariants)](#2-design-principles-invariants)
-- [3. JPL compliance contract — how each mandatory rule is supported](#3-jpl-compliance-contract--how-each-mandatory-rule-is-supported-file--theorem)
+- [3. D-60411 compliance contract — how each *shall* rule is supported](#3-d-60411-compliance-contract--how-each-shall-rule-is-supported-file--theorem)
 - [4. Bounded representation (the budget)](#4-bounded-representation-the-budget)
   - [4.1 Capacity constants](#41-capacity-constants)
   - [4.2 Overflow / bound-exhaustion policy](#42-overflow--bound-exhaustion-policy--saturate-to-error)
@@ -31,42 +31,117 @@ re-architecture that sits on top of it.
 
 ## Introduction
 
-*The NASA JPL C standard — its motivation and structure.*
+*The NASA JPL C standard — its motivation, structure, and the rule set we target.*
 
-**What it is.** The NASA Jet Propulsion Laboratory / Public Safety-Critical
-Software (PCS) *C Coding Standards for the PowerPC* is a rulebook for writing C in
-safety-critical embedded flight software, aimed at the PowerPC processors used
-aboard spacecraft and launch vehicles.
+**In one line.** D-60411 organises C rules into **six Levels of Compliance**
+(LOC-1…LOC-6, 120 rules cumulative, of which 31 are self-contained JPL-authored at
+LOC-1…4); this project targets the kernel-critical **Rules 1–10**, treating every
+*shall* at LOC-1…4 as **Mandatory** and elevating two *should* rules (R6 effects-as-
+data, R17 fixed-width types) to Mandatory as well.
 
-**Why it exists (motivation).** The authors mined large bodies of real flight code
-and correlated coding constructs with the defects actually found. Two facts drive
-the whole standard:
+**Authoritative source (cited, not reproduced).** This project targets the
+**JPL Institutional Coding Standard for the C Programming Language**, JPL DocID
+**D-60411**, Version 1.0 (dated 2009-03-03; the externally-distributed revision
+2009-03-04, clearance CL#09-0763), Jet Propulsion Laboratory, California Institute
+of Technology — © 2009 Caltech, U.S. Government sponsorship acknowledged. The
+external edition omits third-party text (the MISRA-C:2004 rules of LOC-5/LOC-6 and
+the ISO Appendix A), so the self-contained JPL-authored rules are **Rules 1–31 at
+LOC-1…LOC-4**. Everything below is a *paraphrase with citation* — rule numbers and
+short summaries in our own words — not a reproduction of the standard's text.
 
-- Flight software is effectively **immutable after launch** — a latent defect
-  cannot be patched in the field, so the cost of a bug is a lost mission.
-- Many C constructs are **undefined, implementation-defined, or silently lossy** on
-  embedded targets; they let defects hide during development and surface only in
-  flight.
+**Motivation.** D-60411 consolidates two earlier efforts — **MISRA-C:2004** and the
+**"Power of Ten" rules** (IEEE Computer, June 2006, pp. 93–95) — into a single
+institutional standard, and adds coverage for multi-threaded-software risks that
+neither addressed. Its scope is *mission-critical flight software* on embedded
+targets under strict resource constraints. The driving facts are exactly the ones
+that make a mechanically-verified extraction attractive: flight code is effectively
+**immutable after launch**, and many C constructs are **undefined,
+implementation-defined, or silently lossy**, letting defects hide until flight.
 
-The rules therefore forbid constructs that conceal latent defects, favouring
-explicitness, boundedness, and local verifiability over convenience — which is
-precisely the discipline a mechanically-verified extraction must reproduce.
+**Structure: Levels of Compliance (LOC).** The standard defines six separately
+certifiable levels; full compliance for newly-written code is expected at least
+through LOC-4.
 
-**How it is structured.** The standard's ~44 rules fall into three categories, and
-this taxonomy is what the rest of this document is built against:
+| LOC | Segment | Rules at level | Cumulative |
+|---|---|---|---|
+| LOC-1 | Language Compliance | 2 | 2 |
+| LOC-2 | Predictable Execution | 10 | 12 |
+| LOC-3 | Defensive Coding | 7 | 19 |
+| LOC-4 | Code Clarity | 12 | 31 |
+| LOC-5 | MISRA-C:2004 *shall* rules | 73 | 104 |
+| LOC-6 | MISRA-C:2004 *should* rules | 16 | 120 |
 
-| Category | Meaning | Our stance |
-|---|---|---|
-| **Mandatory** | Rules whose violation has demonstrably caused defects; any deviation must be justified in writing. | The target set. Coq proves the *semantic* precondition; the emitter + lint gate enforce the *syntactic* form (§3). |
-| **Apocryphal** | Popular rules for which the defect analysis found no supporting evidence. | Not treated as blockers; honoured only where free. |
-| **Advisory** | Consensus reliability/maintainability guidance, hard to check objectively. | Applied where it does not conflict with the mandatory set. |
+**Convention: *shall* vs *should*.** *Shall* = a requirement that must be followed,
+with compliance verified; *should* = a preference that must be addressed but admits
+justified deviation. At LOC-1…4 every rule is a *shall* except a small asterisked
+minority (e.g. Rule 17 fixed-width types, Rules 24–30). **Our "mandatory" target =
+the *shall* rules at LOC-1…LOC-4**; we additionally honour the *should* rules where
+they cost nothing.
 
-Each published rule carries a *rationale* (usually a real incident), an *exception*
-policy, and a *verification method*. This document mirrors that two-sided
-discipline: every mandatory rule in §3 is stated with (a) the Coq theorem that
-guarantees the model satisfies it semantically, and (b) the emitter/lint mechanism
-that checks the emitted C syntactically. **This project targets the mandatory
-set.**
+**The rule set we target (Rules 1–10, paraphrased).** These kernel-critical rules
+are what the Coq/emitter design is built to satisfy; §3 maps each to the Coq theorem
+that proves it and the mechanism that emits it.
+
+The **Verb** column is D-60411's own *shall*/*should*. The **Our tier** column is the
+enforcement class this project actually applies, expressed in the legacy
+*mandatory / apocryphal / advisory* (M/A/A) vocabulary of the superseded 2001 JPL
+PowerPC scheme — kept here precisely to expose where our tier **misaligns** with
+D-60411's verb:
+
+| # | Rule (D-60411, paraphrased) | Verb | Our tier | Our design hook |
+|---|---|---|---|---|
+| 1 | Conform to ISO C; no reliance on undefined/unspecified behaviour | *shall* | **Mandatory** | pure Coq model; saturate-to-error carrier `bres` (§3, §4.2) |
+| 2 | Compile with all warnings at the highest level + a static analyzer, zero diagnostics | *shall* | **Mandatory** | `clang -std=c99 -Wall -Wextra -Wconversion -Werror` in the lint gate (#26) |
+| 3 | Every terminating loop has a statically determinable upper bound | *shall* | **Mandatory** | `b_fuel`/`MAX_FUEL`; `cfg_budget`/`mrun_live` termination (§3) |
+| 4 | No direct or indirect recursion | *shall* | **Mandatory** | `mloop` tail driver; `glob_it`/`match_any_iter` (§3) |
+| 5 | No dynamic memory allocation after task init (no `malloc`/`sbrk`/`alloca`) | *shall* | **Mandatory** | static pools; `wf_bword`/`wf_benv` length bounds (§3) |
+| 6 | Prefer IPC messages; avoid callbacks; don't run another task's code | *should* | **Mandatory ▲** | `phi` seam returns effects as **data**, host re-enters (#32) |
+| 7 | No task synchronisation via task delays | *shall* | **Advisory · N/A** | n/a — the kernel is single-threaded (linear discipline) |
+| 8 | Shared data has a single owning task; ownership passed explicitly | *should* | **Advisory · N/A** | state is threaded functionally (`cstate`), no shared mutable globals |
+| 9 | Avoid semaphores/locks; if used, one documented order | *should* | **Advisory · N/A** | n/a — no concurrency in the kernel |
+| 10 | Use memory protection / safety margins / barrier patterns to catch violations | *shall* | **Mandatory** | length-carrying bounded arrays + `wf_*` predicates = in-software bounds checks |
+
+**Crosswalk (M/A/A ↔ D-60411).** *mandatory* ≈ a D-60411 *shall* we enforce;
+*advisory* ≈ a D-60411 *should*, or a *shall* whose subject matter does not occur in
+this single-threaded, allocation-free kernel (marked **Advisory · N/A** — R7/R8/R9:
+task synchronisation, shared-data ownership, and locks have no analogue);
+*apocryphal* ≈ a legacy style rule we deliberately do **not** enforce. **▲ (elevated)**
+marks the two rules we treat as stricter than D-60411 requires: **R6** (callbacks /
+effects-as-data) and **R17** (fixed-width, unsigned-only types) are D-60411 *should*
+but are **Mandatory** for us, because a function-pointer seam or a
+narrow/signed/arithmetic-promoted type would break the extraction and the JPL lint
+gate outright. Likewise the *no-float / no-char-or-short-arithmetic* constraint is
+imported from MISRA (LOC-5) and the old mandatory set, not from a D-60411
+LOC-1…4 *shall*. We reproduce **none** of the 2001 document's per-rule text or its
+exact rule-by-rule classifications — they are cited only; the M/A/A labels above are
+**our** enforcement tiers, not quotations from either standard.
+
+Rules 11 (no `goto`/`setjmp`/`longjmp`) and 12 (no partial `enum` initialisation)
+complete LOC-2; Rules 13–19 (Defensive Coding) and 20–31 (Code Clarity) complete
+LOC-3/LOC-4. The constructs most relevant to the emitted C among those — fixed-width
+types (17), explicit evaluation order (18), no side-effect expressions (19), no
+non-constant function pointers (29), limited preprocessor (20–23) — are cited
+against the matching rows of §3.
+
+**Predecessor & references.** D-60411 v1.0 (2009) is the current published
+institutional standard and supersedes the earlier JPL *PowerPC C Coding Standards*
+(2001 — the "44-rule *mandatory / apocryphal / advisory*" scheme some of our older
+notes still echo). This document now uses D-60411's Levels of Compliance and
+*shall*/*should* verbs throughout; "mandatory" is used only as a synonym for a
+D-60411 *shall* rule. Primary sources, as cited by D-60411:
+
+- JPL, *JPL Institutional Coding Standard for the C Programming Language*,
+  JPL DocID **D-60411**, Ver. 1.0, 2009-03-03 (external revision 2009-03-04,
+  clearance CL#09-0763); Jet Propulsion Laboratory, California Institute of
+  Technology. © 2009 Caltech, U.S. Government sponsorship acknowledged.
+- MISRA, *MISRA-C:2004 — Guidelines for the Use of the C Language in Critical
+  Systems*, Motor Industry Software Reliability Association, October 2004.
+- Hennessy/Goldberg et al. lineage, *The Power of Ten — Rules for Developing Safety
+  Critical Code*, IEEE Computer, June 2006, pp. 93–95.
+- ISO/IEC 9899:1999(E), *Programming Languages — C* (C99).
+
+Rule numbers and one-line summaries above are paraphrased for reference; the
+authoritative wording is in D-60411 (and, for LOC-5/6, in MISRA-C:2004).
 
 ## 1. Problem: why re-architecture (not direct emit)
 
@@ -75,14 +150,14 @@ Coq Extraction) to OCaml (`src/kernel/sh_run.ml`) that is **fuel-bounded
 recursion over heap lists** (Peano `nat`, `text = nat list`, `cmd` tree,
 higher-order `obind` callbacks). A literal OCaml->C99 emit would therefore use
 `malloc`, recursion, boxed unary naturals, and function pointers — each of which
-breaks a mandatory canonical JPL PowerPC C rule.
+breaks a JPL D-60411 *shall* rule (Rules 3–5).
 
 Two commitments define the approach:
 - Transforms that make the C JPL-clean live **in the Coq source**, not the
   emitter: re-aim the model to **iteration over bounded array structures**, then
   run a **simple, narrow** OCaml->C99 emitter.
-- Target the **canonical JPL 44-rule C standard**, enforced mechanically by a lint
-  gate over the emitted C.
+- Target the **JPL D-60411 *shall* rules at LOC-1…LOC-4**, enforced mechanically by
+  a lint gate over the emitted C.
 
 ## 2. Design principles (invariants)
 
@@ -104,25 +179,26 @@ Two commitments define the approach:
    `LIMIT_EXHAUSTED` status (the analogue of the model's `fuel = 0 -> None`), never
    silent wraparound — truncation must be observable, not hidden.
 
-## 3. JPL compliance contract — how each mandatory rule is supported (file · theorem)
+## 3. D-60411 compliance contract — how each *shall* rule is supported (file · theorem)
 
-The canonical JPL PowerPC C document splits its rules into **mandatory**,
-**apocryphal**, and **advisory**. We target the *mandatory* set, and treat it as a
-two-sided contract: the **Coq source** proves the *semantic* precondition (the
+We target the **JPL D-60411 *shall* rules at LOC-1…LOC-4** (the self-contained
+JPL-authored set; the Introduction cites the source and maps Rules 1–10). Compliance
+is a two-sided contract: the **Coq source** proves the *semantic* precondition (the
 program is bounded / non-recursive / effect-is-data), and the **emitter (#25) +
 lint gate (#26)** enforce the *syntactic* form of the emitted C. The full general
-verification stack is in `AXIOTACK.md`; per-rule support is below.
+verification stack is in `AXIOTACK.md`; per-rule support is below (D-60411 rule
+numbers in the first column).
 
-| JPL rule theme | Coq precondition (file · theorem) | Realized by |
+| D-60411 rule | Coq precondition (file · theorem) | Realized by |
 |---|---|---|
-| No dynamic allocation (only static objects) | every store is length-carrying + capped: `sh_jpl.v` `wf_bword`/`mk_bword_wf`/`b_push_wf`/`b_app_wf`, `wf_benv`/`benv_setv_fits`/`setv_length_le`; pool gate `cmd_count`/`cmd_fits` | emitter maps bounded `int list`→static array + len; no `malloc` |
-| No recursion (direct or indirect); iteration only | control flow is a tail driver: `sh_jpl_run.v` `mloop` (single `step` per tick); `sh_jpl_scan.v` §4 `glob_it`/`match_any_iter` replace `sh_concrete.glob`'s tree recursion; `nat`→`int` via `ExtrOcamlNatInt` (kills `add`/`sub`/`divmod` fixpoints) | emitter lowers tail `let rec`→`while`; `Extract Constant Nat.div/mod/sub`→primitive ops (#33) |
-| Fixed-width unsigned types only | `sh_jpl.v` §3 `b_add`/`b_sub`/`b_mul`/`b_divmod` + `cap_order` (all values ≤ `MAX_STACK` < 2³², so the word never wraps) | `uint32_t`; `-Wconversion`-clean casts (emitter) |
-| No undefined behaviour; explicit error on bound breach | saturate-to-error carrier `bres`/`bbind`; `sh_jpl.v` `b_add_limit`/`b_divmod_limit` (div-by-0 ⇒ `BLimit`, not UB); `sh_jpl_scan.v` `bt_append_full` | `BLimit` ⇒ defined `LIMIT_EXHAUSTED` return (matches fuel→`None`) |
-| Bounded loop iteration counts | fuel budget `b_fuel`/`b_fuel_ok` (`≤ MAX_FUEL`); machine step budget `sh_jpl_run_phase2.v` `cfg_budget`/`next_decrease`/`prec_wf` ⇒ every run terminates (`mrun_live`) | `while` with a decremented counter, no unbounded loop |
-| No floating point; no `char`/`short` in arithmetic | model has no floats; bytes are `nat` codes (`sh_concrete.v` §1 `text = list nat`) | byte values stay `uint32_t` end to end (emitter) |
-| Effects as data, not function pointers | `phi` seam emits `Oeffect idx argv k s` as a value (`sh_jpl_run.v` `out`); phi-as-data driver is #32 (`mloop` drops the `phi` function arg) | no closures/callbacks in emitted C (host re-enters on the data effect) |
-| Single entry/exit, no `goto`, exhaustive `switch` (no `default`), init-all-locals | nothing in Coq (syntactic only) | emitter codegen (#25) + `verify/c/jpl_lint.sh` grep/clang audit (#26) |
+| **R5** no dynamic allocation (static objects only) | every store is length-carrying + capped: `sh_jpl.v` `wf_bword`/`mk_bword_wf`/`b_push_wf`/`b_app_wf`, `wf_benv`/`benv_setv_fits`/`setv_length_le`; pool gate `cmd_count`/`cmd_fits` | emitter maps bounded `int list`→static array + len; no `malloc` |
+| **R4** no recursion (direct or indirect); iteration only | control flow is a tail driver: `sh_jpl_run.v` `mloop` (single `step` per tick); `sh_jpl_scan.v` §4 `glob_it`/`match_any_iter` replace `sh_concrete.glob`'s tree recursion; `nat`→`int` via `ExtrOcamlNatInt` (kills `add`/`sub`/`divmod` fixpoints) | emitter lowers tail `let rec`→`while`; `Extract Constant Nat.div/mod/sub`→primitive ops (#33) |
+| **R17** fixed-width types (unsigned here) | `sh_jpl.v` §3 `b_add`/`b_sub`/`b_mul`/`b_divmod` + `cap_order` (all values ≤ `MAX_STACK` < 2³², so the word never wraps) | `uint32_t`; `-Wconversion`-clean casts (emitter) |
+| **R1** no undefined/unspecified behaviour; explicit error on breach | saturate-to-error carrier `bres`/`bbind`; `sh_jpl.v` `b_add_limit`/`b_divmod_limit` (div-by-0 ⇒ `BLimit`, not UB); `sh_jpl_scan.v` `bt_append_full` | `BLimit` ⇒ defined `LIMIT_EXHAUSTED` return (matches fuel→`None`) |
+| **R3** statically-bounded loop iterations | fuel budget `b_fuel`/`b_fuel_ok` (`≤ MAX_FUEL`); machine step budget `sh_jpl_run_phase2.v` `cfg_budget`/`next_decrease`/`prec_wf` ⇒ every run terminates (`mrun_live`) | `while` with a decremented counter, no unbounded loop |
+| **R17** (+ MISRA LOC-5) no float; no `char`/`short` arithmetic | model has no floats; bytes are `nat` codes (`sh_concrete.v` §1 `text = list nat`) | byte values stay `uint32_t` end to end (emitter) |
+| **R6/R29** effects as data, not function pointers | `phi` seam emits `Oeffect idx argv k s` as a value (`sh_jpl_run.v` `out`); phi-as-data driver is #32 (`mloop` drops the `phi` function arg) | no closures/callbacks in emitted C (host re-enters on the data effect) |
+| **R11** (+ style) no `goto`; single entry/exit; exhaustive `switch` (no `default`), init-all-locals | nothing in Coq (syntactic only) | emitter codegen (#25) + `verify/c/jpl_lint.sh` grep/clang audit (#26) |
 
 Semantic soundness of the iterative driver itself (so the above is *proved* to
 agree with the spec, not just shaped right): `sh_jpl_run.v` `step_preserves` +
@@ -240,7 +316,7 @@ rationale without polluting the normative spec.
 - **Saturate-to-error** overflow policy chosen over modular wraparound (principle 5).
 - **Capacity defaults** (`MAX_*` in §4.1) confirmed as proposed.
 - Supersedes the earlier "transpile `sh_run.ml` directly" plan, which violated the
-  mandatory JPL rule set.
+  JPL D-60411 *shall* rules.
 
 ### JPL.2 — DONE (2026-10-03): verify/models/sh_jpl.v
 
