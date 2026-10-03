@@ -43,6 +43,9 @@ for arg in "$@"; do
 done
 
 COQ_PROPERTIES=("sh_properties.v" "sh_concrete.v" "sh_jpl.v" "sh_jpl_run.v")
+# JPL.3b: the two-sided machine equivalence lives in its own module, which
+# Require Imports sh_jpl_run (so it must be compiled after it).
+COQ_PHASE2=("sh_jpl_run_phase2.v")
 PASS=0
 FAIL=0
 
@@ -51,41 +54,46 @@ red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 # ── 1. Rocq / Coq formal properties ────────────────────────────────
+coq_gate() {
+  local p="$1" COQ_OUT AX MOD
+  bold "==> Coq/Rocq properties ($p)"
+  if COQ_OUT="$(coqc "$p" 2>&1)"; then
+    if echo "$COQ_OUT" | grep -q "Error"; then
+      red "FAIL: coqc reported Error in $p"
+      echo "$COQ_OUT"
+      FAIL=$((FAIL + 1))
+    else
+      # compiling is not the same as being axiom-free: re-check the .vo in
+      # the kernel and refuse a non-empty axiom / unsafe-construction list.
+      MOD="${p%.v}"
+      if AX="$(coqchk -o -silent "$MOD" 2>&1)" \
+         && echo "$AX" | grep -q "Axioms: <none>" \
+         && echo "$AX" | grep -q "type-in-type: <none>" \
+         && echo "$AX" | grep -q "(co)fixpoints: <none>" \
+         && echo "$AX" | grep -q "positivity is assumed: <none>"; then
+        green "PASS: coqc + coqchk ($p - theorems closed, no axioms)"
+        PASS=$((PASS + 1))
+      else
+        red "FAIL: coqchk found axioms or unsafe constructions in $p"
+        echo "$AX" | grep -i -A3 "axioms:\|type-in-type:\|fixpoints:\|positivity"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
+  else
+    red "FAIL: coqc exited non-zero for $p"
+    echo "$COQ_OUT"
+    FAIL=$((FAIL + 1))
+  fi
+  echo
+}
+
 if [[ "$SKIP_COQ" -eq 0 ]]; then
   if ! command -v coqc >/dev/null 2>&1; then
     red "FAIL: coqc not found (install Rocq/Coq or use --skip-coq)"
     FAIL=$((FAIL + 1))
   else
-    for p in "${COQ_PROPERTIES[@]}"; do
-      bold "==> Coq/Rocq properties ($p)"
-      if COQ_OUT="$(coqc "$p" 2>&1)"; then
-        if echo "$COQ_OUT" | grep -q "Error"; then
-          red "FAIL: coqc reported Error in $p"
-          echo "$COQ_OUT"
-          FAIL=$((FAIL + 1))
-        else
-          # compiling is not the same as being axiom-free: re-check the .vo in
-          # the kernel and refuse a non-empty axiom / unsafe-construction list.
-          MOD="${p%.v}"
-          if AX="$(coqchk -o -silent "$MOD" 2>&1)" \
-             && echo "$AX" | grep -q "Axioms: <none>" \
-             && echo "$AX" | grep -q "type-in-type: <none>" \
-             && echo "$AX" | grep -q "(co)fixpoints: <none>" \
-             && echo "$AX" | grep -q "positivity is assumed: <none>"; then
-            green "PASS: coqc + coqchk ($p - theorems closed, no axioms)"
-            PASS=$((PASS + 1))
-          else
-            red "FAIL: coqchk found axioms or unsafe constructions in $p"
-            echo "$AX" | grep -i -A3 "axioms:\|type-in-type:\|fixpoints:\|positivity"
-            FAIL=$((FAIL + 1))
-          fi
-        fi
-      else
-        red "FAIL: coqc exited non-zero for $p"
-        echo "$COQ_OUT"
-        FAIL=$((FAIL + 1))
-      fi
-      echo
+    for p in "${COQ_PROPERTIES[@]}" "${COQ_PHASE2[@]}"; do
+      coq_gate "$p"
     done
   fi
 else
