@@ -36,13 +36,14 @@
  *   - host_live       : cfg_run phi g = Some st -> exists B, host phi B g = BOk st
  *                       (completeness), by strong induction on the phase2 ranking
  *                       `cfg_budget` reusing `mrun_live`, `next_decrease`.
- *   - host_iff_run_init : the two-sided agreement with concrete `run` at the
+ *   - host_iff_run    : the two-sided agreement with concrete `run` at the
  *                       initial config — the JPL.3b `mloop_iff` counterpart for
  *                       the data driver.
  *   - mrun_dres_monotone / host_monotone: determinism — a reached DDone/DEff
  *     (resp. BOk) is stable under extra budget.
- *   - §6 re-checks the conformance boundary by computation: the data driver and
- *     the host agree with concrete `run` on the pure seam (`reflexivity`), the
+ *   - §7 re-checks the conformance boundary by computation: the closure-free data
+ *     driver reaches DDone without a seam, returns an Ext leaf as DEff DATA, and
+ *     the host agrees with concrete `run` on the pure seam (`reflexivity`), the
  *     same way sh_jpl_run §7 checks `mloop`.
 
  * Build (Rocq >= 9.0):
@@ -55,6 +56,7 @@ From Stdlib Require Import List.
 From Stdlib Require Import Arith.
 From Stdlib Require Import Bool.
 From Stdlib Require Import Lia.
+From Stdlib Require Import Wf_nat.
 Import ListNotations.
 
 Require Import sh_concrete.       (* the reference semantics run/... *)
@@ -159,37 +161,41 @@ Qed.
 Lemma mrun_dres_monotone : forall B B' g d,
   B <= B' -> mrun B g = d -> d <> DLim -> mrun B' g = d.
 Proof.
-  intros B. induction B as [|B'' IH]; intros B' g d Hle Hd Hn.
-  - cbn [mrun] in Hd. subst d. discriminate.
+  induction B as [|B'' IH]; intros B' g d Hle Hd Hn.
+  - (* B = 0: mrun saturates, so d = DLim, excluded by Hn *)
+    cbn [mrun] in Hd. exfalso. apply Hn. symmetry. exact Hd.
   - destruct B' as [|B']; [ lia |].
-    cbn [mrun].
-    destruct (step g) as [g' | idx argv k s | sd |] eqn:Es; cbn [mrun].
-    + apply IH; [ lia | exact Hd | exact Hn ].
-    + rewrite Hd. reflexivity.
-    + rewrite Hd. reflexivity.
-    + subst d. contradiction.
+    destruct (step g) as [g' | idx argv k s | sd |] eqn:Es;
+      cbn [mrun]; rewrite Es; cbn [mrun] in Hd; rewrite Es in Hd.
+    + (* Onext g': the successor is at budget B''; IH transfers to B' *)
+      apply IH; [ lia | exact Hd | exact Hn ].
+    + (* Oeffect: the effect is returned as data at every positive budget *)
+      exact Hd.
+    + (* Odone: the answer is reached at every positive budget *)
+      exact Hd.
+    + (* Olimit: d = DLim by hypothesis, discharge directly *)
+      exact Hd.
 Qed.
 
 Lemma host_monotone : forall B B' phi g st,
   B <= B' -> host phi B g = BOk st -> host phi B' g = BOk st.
 Proof.
-  intros B. induction B as [|B'' IH]; intros B' phi g st Hle Hh.
+  induction B as [|B'' IH]; intros B' phi g st Hle Hh.
   - cbn [host] in Hh. discriminate.
   - destruct B' as [|B']; [ lia |].
-    cbn [host] in Hh |- *.
+    cbn [host] in Hh.
     destruct (mrun B'' g) as [sd | idx argv k s |] eqn:Hm; cbn in Hh.
-    + (* DDone sd *)
+    + (* DDone sd: extra budget keeps the same DDone boundary *)
       injection Hh as Eeq; subst st.
-      rewrite (mrun_dres_monotone B'' B' g (DDone sd)); try lia.
-      - reflexivity.
-      - exact Hm.
-      - discriminate.
-    + (* DEff *)
+      assert (M : mrun B' g = DDone sd).
+      { apply (mrun_dres_monotone B'' B' g (DDone sd)); [ lia | exact Hm | discriminate ]. }
+      cbn [host]. rewrite M. reflexivity.
+    + (* DEff: re-enter the host with the same or larger budget *)
       destruct (phi idx argv s) as [s' |] eqn:Ep; [ | discriminate Hh].
-      rewrite (mrun_dres_monotone B'' B' g (DEff idx argv k s)); try lia.
-      - apply IH; [ lia | exact Hh ].
-      - exact Hm.
-      - discriminate.
+      assert (M : mrun B' g = DEff idx argv k s).
+      { apply (mrun_dres_monotone B'' B' g (DEff idx argv k s)); [ lia | exact Hm | discriminate ]. }
+      cbn [host]. rewrite M, Ep.
+      apply IH; [ lia | exact Hh ].
     + discriminate Hh.
 Qed.
 
@@ -200,12 +206,13 @@ Lemma mrun_not_dlim : forall B phi g st,
   mloop phi B g = BOk st -> mrun B g <> DLim.
 Proof.
   intros B. induction B as [|B' IH]; intros phi g st H.
-  - cbn [mloop] in H. discriminate.
-  - cbn [mloop mrun] in H.
-    destruct (step g) as [g' | idx argv k s | sd |] eqn:Es; cbn [mrun] in H |- *.
-    + apply IH. exact H.
-    + destruct (phi idx argv s) as [s' |] eqn:Ep; [ | discriminate H]. discriminate.
-    + discriminate.
+  - cbn [mloop] in H. discriminate H.
+  - cbn [mloop] in H. intro HD. cbn [mrun] in HD.
+    destruct (step g) as [g' | idx argv k s | sd |].
+    + (* Onext g': the successor driver also answers, IH transfers *)
+      exact (IH phi g' st H HD).
+    + discriminate HD.
+    + discriminate HD.
     + discriminate H.
 Qed.
 
@@ -227,7 +234,7 @@ Proof.
   - cbn [mrun] in H.
     destruct (step g) as [g' | idx2 argv2 k2 s2 | sd |] eqn:Es; cbn in H.
     + (* Onext g': IH at the successor, then the successor is below g *)
-      apply IH in H.
+      pose proof (IH g' idx argv k s s' H) as A.
       assert (Nd : cfg_budget g' < cfg_budget g).
       { apply next_decrease. unfold next. left. exact Es. }
       lia.
@@ -274,12 +281,12 @@ Lemma host_live_aux : forall n phi g st,
   cfg_budget g <= n -> cfg_run phi g = Some st ->
   exists B, host phi B g = BOk st.
 Proof.
-  induction n as [|n IHn]; intros phi g st Hb Hr.
+  induction n as [n IH] using (well_founded_induction lt_wf); intros phi g st Hb Hr.
   destruct (mrun_live phi g st Hr) as [B0 Hm0].
-  assert (NE : mrun B0 g <> DLim) by (apply mrun_not_dlim, Hm0).
-  destruct (mrun B0 g) as [sd | idx argv k s |] eqn:Hm; [ | | contradiction].
+  assert (NE : mrun B0 g <> DLim) by (exact (mrun_not_dlim B0 phi g st Hm0)).
+  destruct (mrun B0 g) as [sd | idx argv k s |] eqn:Hm.
   - (* DDone: host (S B0) reaches it directly *)
-    assert (E : cfg_run phi g = Some sd) := mrun_done_sound phi B0 g sd Hm.
+    pose proof (mrun_done_sound phi B0 g sd Hm) as E.
     assert (Eq : Some sd = Some st) by (rewrite <- E, <- Hr; reflexivity).
     injection Eq as Eeq; subst st.
     exists (S B0). cbn [host]. rewrite Hm. reflexivity.
@@ -287,18 +294,22 @@ Proof.
     destruct (phi idx argv s) as [s' |] eqn:Ep; [ | ].
     + assert (Eg : cfg_run phi g = cont_run phi k (Some s')).
       { rewrite (mrun_eff_sound phi B0 g idx argv k s Hm), Ep. reflexivity. }
-        assert (Ere : cfg_run phi (CFG 0 None k s') = Some st).
-        { unfold cfg_run. cbn [cc ck cs]. rewrite <- Eg. exact Hr. }
-        assert (Ndb : cfg_budget (CFG 0 None k s') < cfg_budget g)
-          by (apply (mrun_deff_budget B0 g idx argv k s s' Hm)).
-        destruct (IHn phi (CFG 0 None k s') st) as [B' Hb']; [ lia | exact Ere |].
-        exists (S (B0 + B')). cbn [host].
-        rewrite (mrun_dres_monotone B0 (B0 + B') g (DEff idx argv k s)); [ | | exact Hm].
-        * apply (host_monotone B' (B0 + B') phi (CFG 0 None k s') st); [ lia | exact Hb' ].
-        * lia.
-        * discriminate.
+      assert (Ere : cfg_run phi (CFG 0 None k s') = Some st).
+      { unfold cfg_run. cbn [cc ck cs]. rewrite <- Eg. exact Hr. }
+      assert (Ndb : cfg_budget (CFG 0 None k s') < cfg_budget g)
+        by (exact (mrun_deff_budget B0 g idx argv k s s' Hm)).
+      (* the successor's budget is < n, so the strong IH applies at it *)
+      pose proof (IH (cfg_budget (CFG 0 None k s')) ltac:(lia)) as IHg.
+      destruct (IHg phi (CFG 0 None k s') st (Nat.le_refl _) Ere) as [B' Hb'].
+      exists (S (B0 + B')).
+      assert (M : mrun (B0 + B') g = DEff idx argv k s).
+      { apply (mrun_dres_monotone B0 (B0 + B') g (DEff idx argv k s));
+          [ lia | exact Hm | discriminate ]. }
+      cbn [host]. rewrite M, Ep.
+      apply (host_monotone B' (B0 + B') phi (CFG 0 None k s') st); [ lia | exact Hb' ].
     + rewrite (mrun_eff_sound phi B0 g idx argv k s Hm), Ep, cont_run_none in Hr.
       discriminate.
+  - (* DLim is excluded by NE *) exfalso. apply NE. reflexivity.
 Qed.
 
 Theorem host_live : forall phi g st,
@@ -349,65 +360,107 @@ Proof.
 Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
-   §7  §7 conformance boundary, re-checked by the data driver (pure_phi)
+   §7  §7 conformance boundary, re-checked through the data driver
 
-   Each is a closed computation whose result equals the concrete `run` fact from
-   sh_concrete §7 — the data driver and the host are checked against the single
-   source of truth, not a parallel re-derivation.
+   Three layers of witness, in increasing amount of host involvement:
+     (a) `mrun` ALONE reaches DDone on a command with no external leaf — the
+         kernel loop needs no callback to finish control flow;
+     (b) at an `Ext` leaf `mrun` returns the seam as a DATA quadruple
+         (idx, argv, stack, state) — this is what the emitter lowers to a struct
+         plus an int, never a function pointer;
+     (c) the §7 status facts, now produced by `host` servicing those data
+         effects, each additionally pinned to the concrete reference by an
+         equality with `b_of (run pure_run_phi …)` — agreement with the single
+         source of truth, not a parallel re-derivation.
    ═══════════════════════════════════════════════════════════════════ *)
 
-(* The pure seam has no external effect to service, so `mrun` runs straight to a
-   DDone on the short-circuit boundary cases. *)
-Example mrun_pure_and_left_false :
-  mrun 5 (CFG (S 3) (Some (And (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
-  = DDone (CS 1 []).
+(* (a) pure control flow: the closure-free kernel runs to completion by itself *)
+Example mrun_pure_skip_done :
+  mrun 8 (CFG (S 3) (Some (Seq Skip (Seq Skip Skip))) [] (CS 7 []))
+  = DDone (CS 7 []).
 Proof. reflexivity. Qed.
 
-Example mrun_pure_or_left_true :
-  mrun 5 (CFG (S 3) (Some (Or (Ext 0 [true_w]) (Ext 0 [false_w]))) [] (CS 7 []))
-  = DDone (CS 0 []).
+(* (b) the external-command seam comes back as data, with its stack and state *)
+Example mrun_ext_is_data :
+  mrun 2 (CFG (S 3) (Some (And (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
+  = DEff 0 [false_w] [FAnd 3 (Ext 0 [true_w])] (CS 7 []).
 Proof. reflexivity. Qed.
 
-Example mrun_pure_bang_false :
-  mrun 5 (CFG (S 3) (Some (Bang (Ext 0 [false_w]))) [] (CS 7 []))
-  = DDone (CS 0 []).
+(* (c) short-circuit boundary statuses, through host + data effects *)
+Example host_pure_and_left_false :
+  host pure_run_phi 12 (CFG (S 3) (Some (And (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
+  = BOk (CS 1 []).
 Proof. reflexivity. Qed.
 
-Example mrun_pure_while_false_zero :
-  mrun 5 (CFG (S 3) (Some (While (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
-  = DDone (CS 1 []).
+Example host_pure_or_left_true :
+  host pure_run_phi 12 (CFG (S 3) (Some (Or (Ext 0 [true_w]) (Ext 0 [false_w]))) [] (CS 7 []))
+  = BOk (CS 0 []).
 Proof. reflexivity. Qed.
 
-Example mrun_pure_assign_binds :
-  match mrun 3 (CFG (S 3) (Some (Assign [97] [98])) [] (CS 7 [])) with
-  | DDone s => getv [97] (cenv s)
+Example host_pure_bang_false :
+  host pure_run_phi 12 (CFG (S 3) (Some (Bang (Ext 0 [false_w]))) [] (CS 7 []))
+  = BOk (CS 0 []).
+Proof. reflexivity. Qed.
+
+Example host_pure_while_false_zero :
+  host pure_run_phi 12 (CFG (S 3) (Some (While (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
+  = BOk (CS 1 []).
+Proof. reflexivity. Qed.
+
+Example host_pure_assign_binds :
+  match host pure_run_phi 12 (CFG (S 3) (Some (Assign [97] [98])) [] (CS 7 [])) with
+  | BOk s => getv [97] (cenv s)
   | _ => None
   end
   = Some [98].
 Proof. reflexivity. Qed.
 
-(* The host over the pure seam equals b_of (run pure_phi ...) on the same command,
-   tying the data driver + host directly to the reference `run`. *)
+(* Each of the above agrees with the reference `run` on the same command. *)
 Example host_pure_seq_eq_run :
-  host pure_run_phi 8 (CFG (S 3) (Some (Seq (Ext 0 [true_w]) (Ext 0 [false_w]))) [] (CS 7 []))
+  host pure_run_phi 12 (CFG (S 3) (Some (Seq (Ext 0 [true_w]) (Ext 0 [false_w]))) [] (CS 7 []))
   = b_of (run pure_run_phi (S 3) (Seq (Ext 0 [true_w]) (Ext 0 [false_w])) (CS 7 [])).
 Proof. reflexivity. Qed.
 
 Example host_pure_if_eq_run :
-  host pure_run_phi 6 (CFG (S 3) (Some (If (Ext 0 [true_w]) (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
+  host pure_run_phi 12 (CFG (S 3) (Some (If (Ext 0 [true_w]) (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
   = b_of (run pure_run_phi (S 3) (If (Ext 0 [true_w]) (Ext 0 [false_w]) (Ext 0 [true_w])) (CS 7 [])).
+Proof. reflexivity. Qed.
+
+Example host_pure_and_eq_run :
+  host pure_run_phi 12 (CFG (S 3) (Some (And (Ext 0 [false_w]) (Ext 0 [true_w]))) [] (CS 7 []))
+  = b_of (run pure_run_phi (S 3) (And (Ext 0 [false_w]) (Ext 0 [true_w])) (CS 7 [])).
+Proof. reflexivity. Qed.
+
+(* The list-shaped commands (Case, For) agree too — the whole control surface,
+   including a fuel-exhausted shape that `run` rejects. *)
+Example host_pure_case_eq_run :
+  host pure_run_phi 20
+    (CFG (S 3) (Some (Case [97] [([[98]], [Ext 0 [true_w]]); ([[42]], [Ext 0 [false_w]])])) [] (CS 7 []))
+  = b_of (run pure_run_phi (S 3)
+            (Case [97] [([[98]], [Ext 0 [true_w]]); ([[42]], [Ext 0 [false_w]])]) (CS 7 [])).
+Proof. reflexivity. Qed.
+
+Example host_pure_for_eq_run :
+  host pure_run_phi 24
+    (CFG 6 (Some (For [120] [[97]; [98]] [Ext 0 [false_w]])) [] (CS 5 []))
+  = b_of (run pure_run_phi 6 (For [120] [[97]; [98]] [Ext 0 [false_w]]) (CS 5 [])).
+Proof. reflexivity. Qed.
+
+Example host_pure_for_low_fuel_eq_run :
+  host pure_run_phi 24 (CFG 2 (Some (For [120] [[97]; [98]] [Ext 0 [false_w]])) [] (CS 5 []))
+  = b_of (run pure_run_phi 2 (For [120] [[97]; [98]] [Ext 0 [false_w]]) (CS 5 [])).
 Proof. reflexivity. Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
    §8  The driver is closure-free by construction
 
    `mrun` and `dres` mention no `run_phi`: the kernel loop the emitter lowers has
-   the seam only as DATA (JPL Rules 6 / 29).  Recorded as a computable witness —
-   `mrun` is a function of the step budget and configuration alone. *)
+   the seam only as DATA (JPL Rules 6 / 29).  Recorded as an inhabitant of a
+   first-order type — the type itself contains no function argument. *)
 
-Example mrun_takes_no_phi :
-  mrun = mrun.  (* the driver's type is nat -> cfg -> dres, with no run_phi index *)
-Proof. reflexivity. Qed.
+Definition mrun_type : Type := nat -> cfg -> dres.
+
+Example mrun_closure_free : mrun_type := mrun.
 
 Check mrun.      (* nat -> cfg -> dres *)
 Check dres.      (* Type: DDone / DEff (effect data) / DLim *)

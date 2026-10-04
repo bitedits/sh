@@ -28,7 +28,7 @@
  *   1. Axiom-free: coqchk -o -silent must report all four <none> lines.  No
  *      Axiom/Parameter/Admitted/admit anywhere below.
  *   2. Fixed-width unsigned naturals: a Coq nat here stands for a uint32_t in the
- *      emitted C.  Every value produced by this layer is provably <= MAX_STACK,
+ *      emitted C.  Every value produced by this layer is provably <= MAX_FUEL,
  *      i.e. well inside 32-bit range, so the emit never wraps; when a computation
  *      would cross a capacity the bounded operation returns BLimit instead.
  *   3. No unbounded recursion in the representation: lists are wrapped in
@@ -59,11 +59,14 @@ Require Import sh_concrete.
 Set Warnings "-register-all".
 
 (* ═══════════════════════════════════════════════════════════════════
-   §1  Capacity constants (LOCKED — JPL.md, user 2026-10-03)
+   §1  Capacity constants (LOCKED — JPL.md, user 2026-10-03; GLOB_FUEL and the
+   raised MAX_FUEL added on the user's instruction of 2026-10-04)
 
    These are the compile-time budgets the emitted C allocates against.  They
-   are written as Coq nats but become #define uint32_t constants at the emitter;
-   each is provably < 2^31 so it fits the fixed-width word.
+   are written as Coq nats but become #define uint32_t constants at the emitter.
+   None is a large literal: each is a small literal or a sum/product of them, and
+   the largest (MAX_FUEL = 136 449) is three orders of magnitude below 2^31, so
+   every one fits the fixed-width word — see cap_order and cap_fuel_order.
    ═══════════════════════════════════════════════════════════════════ *)
 
 Definition MAX_WIDTH : nat := 32.      (* uint32 word bits *)
@@ -72,16 +75,173 @@ Definition MAX_ARGV  : nat := 64.      (* argument words per simple command *)
 Definition MAX_ENV   : nat := 128.     (* simultaneously live shell variables *)
 Definition MAX_LIST  : nat := 1024.    (* any intermediate list length *)
 Definition MAX_CMD   : nat := 4096.    (* node-pool capacity for one lowered cmd tree *)
-Definition MAX_FUEL  : nat := 4096.    (* loop-iteration bound *)
+
+(* GLOB_FUEL — the scan budget, added 2026-10-04 on the user's instruction to
+   raise the fuel budget once sh_jpl_scan.v §4.3 proved glob's completeness.  That
+   section shows the tail loop needs its OWN quadratic law, not the reference
+   matcher's linear one:
+
+     fuel_top pat str = (|pat|+|str|+1)*(|str|+1) + |pat| + |str|
+
+   so on two full-width words it is (2*MAX_WORD+1)*(MAX_WORD+1) + 2*MAX_WORD, which
+   is exactly the definition below (decimal 132 353; the value is DERIVED from
+   MAX_WORD and never written as a literal, so it cannot drift if MAX_WORD changes).
+   sh_jpl_scan.v §4.3.14 proves `fuel_top pat str <= GLOB_FUEL` from
+   `length pat <= MAX_WORD /\ length str <= MAX_WORD`, and that is the only reason
+   this constant exists: the old MAX_FUEL = 4096 could not carry it (the bound
+   crosses 4096 at |pat| = |str| = 45, measured in §4.3.9), so a machine that globs
+   at full word would have saturated rather than answered.  No slack is baked in —
+   the margin lives in MAX_FUEL, which is this budget plus the machine's steps. *)
+Definition GLOB_FUEL : nat :=
+  S (MAX_WORD + MAX_WORD) * S MAX_WORD + MAX_WORD + MAX_WORD.
+
+(* The machine hands ONE fuel number both to its step countdown and to the scans it
+   calls, so the loop-iteration bound must cover the deepest scan it can be asked to
+   run: GLOB_FUEL (one full-width glob) plus the 4096 steps this layer was originally
+   budgeted for (decimal 136 449).  b_fuel below is the gate that refuses anything
+   larger, and sh_jpl_scan.v §4.3.14's corollary shows the machine may therefore be
+   handed exactly MAX_FUEL and still find every real match. *)
+Definition MAX_FUEL  : nat := GLOB_FUEL + 4096.
+
 Definition MAX_STACK : nat := 4096 + 4096.  (* explicit machine stack frames = 8192 *)
 
-(* The caps are totally ordered with MAX_STACK the largest.  Since MAX_STACK =
-   8192 < 2^32, every value this layer produces (bounded above by MAX_STACK)
-   fits the fixed-width uint32 word, so the emitted C never wraps. *)
+(* The caps are totally ordered and MAX_FUEL is now the largest — MAX_STACK sits
+   under GLOB_FUEL, which underlies MAX_FUEL (cap_fuel_order below).  Since
+   MAX_FUEL = 136 449 is three orders of magnitude below 2^31, every value this
+   layer produces (bounded above by MAX_FUEL) fits the fixed-width uint32 word, so
+   the emitted C never wraps. *)
 Lemma cap_order :
   MAX_WIDTH <= MAX_WORD /\ MAX_ARGV <= MAX_ENV /\ MAX_ENV <= MAX_LIST /\
-  MAX_LIST <= MAX_CMD /\ MAX_CMD <= MAX_FUEL /\ MAX_FUEL <= MAX_STACK.
-Proof. unfold MAX_WIDTH, MAX_WORD, MAX_ARGV, MAX_ENV, MAX_LIST, MAX_CMD, MAX_FUEL, MAX_STACK. lia. Qed.
+  MAX_LIST <= MAX_CMD /\ MAX_CMD <= MAX_STACK.
+Proof. unfold MAX_WIDTH, MAX_WORD, MAX_ARGV, MAX_ENV, MAX_LIST, MAX_CMD, MAX_STACK. lia. Qed.
+
+(* The two fuel links.  GLOB_FUEL <= MAX_FUEL is pure structure (MAX_FUEL is this
+   budget plus a positive allowance).  MAX_STACK <= GLOB_FUEL is a closed decision
+   on the two literals, checked by the VM rather than by building a 132 353-node
+   Peano term by hand. *)
+Lemma cap_fuel_order : MAX_STACK <= GLOB_FUEL /\ GLOB_FUEL <= MAX_FUEL.
+Proof.
+  split.
+  - unfold MAX_STACK, GLOB_FUEL. apply Nat.leb_le. vm_compute. reflexivity.
+  - unfold MAX_FUEL. lia.
+Qed.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §1.1  The cap table as DATA the extracted artifact carries (5-B.2a)
+
+   WHY THIS SECTION EXISTS.  JPL.md §6's C layout allocates against all nine
+   constants above, but Coq's Extraction emits a constant only where the
+   *code* mentions it: MAX_WORD, MAX_ENV, MAX_LIST, GLOB_FUEL and MAX_FUEL
+   already reach sh_run_c.ml because a kernel guard compares with them, while
+   MAX_WIDTH, MAX_ARGV, MAX_CMD and MAX_STACK occur in proofs only and would
+   simply be dropped.  The emitter must not keep its own copy of the four —
+   that is a second, unchecked encoding of a LOCKED table, and this project has
+   already retired a parallel encoding (sh_model.ml) for exactly that reason.
+   So the table is exported as one value that the extraction driver names, and
+   jpl_caps_are_locked below re-proves every field against the §1 literal: a
+   cap that drifts breaks the model build rather than silently resizing a pool.
+
+   WHY TWO FIELDS ARE DERIVED RATHER THAN COPIED.  Two independent reasons
+   agree here.  (i) Size: ExtrOcamlNatInt renders a nat literal as one
+   Stdlib.Int.succ per unit, so jpl_cmd := MAX_CMD would put a 4096-application
+   chain (about a thousand lines) into a vendored artifact, and MAX_STACK would
+   double it.  (ii) Provenance: the compact spellings are the *justifications*
+   JPL.md §4.1 already gives, turned into definitions — the margin between the
+   two fuel caps is exactly the node pool (max_fuel_margin_eq_MAX_CMD, proved in
+   sh_jpl_run_c.v §5.4 and re-proved here locally), and the frame cap is
+   documented as 2·MAX_CMD.  Nothing is re-chosen; the arithmetic identities are
+   checked by lia against the literals, so a future change to MAX_FUEL's
+   allowance would fail the pin rather than silently move the pool size.
+
+   case_site_fuel is deliberately absent: it is a guard *threshold* the machine
+   is handed at runtime, not a capacity something is allocated against.
+
+   Nat.sub / Nat.add are written qualified, not as - / +, so the extraction
+   driver's Extract Constant hooks (clamped subtraction, int addition) bind on
+   these exact constants — the TOOLCHAIN GOTCHA recorded in sh_extract_jpl_c.v.
+   ═══════════════════════════════════════════════════════════════════ *)
+
+(* The node pool capacity, read off the two fuel caps the artifact already
+   carries.  MAX_FUEL >= GLOB_FUEL (cap_fuel_order), so the clamped subtraction
+   never clamps. *)
+Definition max_cmd_from_margin : nat := Nat.sub MAX_FUEL GLOB_FUEL.
+
+Lemma max_cmd_from_margin_is_MAX_CMD : max_cmd_from_margin = MAX_CMD.
+Proof. unfold max_cmd_from_margin, MAX_FUEL, MAX_CMD. lia. Qed.
+
+(* The frame capacity: one frame per live continuation of a pool-sized program,
+   which is what "MAX_STACK = 2·MAX_CMD" in JPL.md §4.1 states. *)
+Definition max_stack_from_margin : nat :=
+  Nat.add max_cmd_from_margin max_cmd_from_margin.
+
+Lemma max_stack_from_margin_is_MAX_STACK : max_stack_from_margin = MAX_STACK.
+Proof.
+  unfold max_stack_from_margin, max_cmd_from_margin, MAX_STACK, MAX_FUEL, MAX_CMD.
+  lia.
+Qed.
+
+Record jpl_caps : Type := JplCaps
+  { jpl_width      : nat   (* bits in the fixed-width word  = MAX_WIDTH  *)
+  ; jpl_word       : nat   (* bytes per text               = MAX_WORD    *)
+  ; jpl_argv       : nat   (* argument words per simple cmd= MAX_ARGV    *)
+  ; jpl_env        : nat   (* live shell variables         = MAX_ENV     *)
+  ; jpl_list       : nat   (* any intermediate list length = MAX_LIST    *)
+  ; jpl_cmd        : nat   (* cmd node pool capacity       = MAX_CMD     *)
+  ; jpl_stack      : nat   (* frame pool capacity          = MAX_STACK   *)
+  ; jpl_glob_fuel  : nat   (* one scan's own budget        = GLOB_FUEL   *)
+  ; jpl_fuel       : nat   (* steps the machine may be given= MAX_FUEL   *)
+  }.
+
+Definition jpl_caps_table : jpl_caps :=
+  {| jpl_width     := MAX_WIDTH
+   ; jpl_word      := MAX_WORD
+   ; jpl_argv      := MAX_ARGV
+   ; jpl_env       := MAX_ENV
+   ; jpl_list      := MAX_LIST
+   ; jpl_cmd       := max_cmd_from_margin
+   ; jpl_stack     := max_stack_from_margin
+   ; jpl_glob_fuel := GLOB_FUEL
+   ; jpl_fuel      := MAX_FUEL
+  |}.
+
+(* ANTI-DRIFT PIN.  jpl_caps_table is the emitter's ONLY source for the numbers
+   it sizes arrays with, so the table has to be pinned against §1's LOCKED
+   constants inside the model: every exported field must equal the constant it
+   names, and the table must keep §1's ordering chain (MAX_WIDTH is the word the
+   others fit in, MAX_FUEL stays the largest value in the system), because the
+   emitted C's array dimensions inherit both facts.
+
+   FORM OF THE PIN.  The pin is stated as one decidable boolean and closed by
+   the VM, for the same reason cap_fuel_order above is: every quantity involved
+   is a closed nat, and a Prop-level `reflexivity` would ask the conversion
+   machine to normalise 132 353-node Peano terms — work the VM does in
+   milliseconds and the kernel does not have to be shown.  A drift in any cap,
+   or in the derived spellings below, makes THIS lemma fail to compile, so the
+   model build breaks instead of a pool silently resizing.
+   The two fields that are not copied verbatim also carry Prop-level identity
+   lemmas (max_cmd_from_margin_is_MAX_CMD, max_stack_from_margin_is_MAX_STACK),
+   which are the transportable facts a later proof can cite; the boolean pin is
+   the machine check over the whole table. *)
+Definition jpl_caps_okb : bool :=
+  Nat.eqb (jpl_width     jpl_caps_table) MAX_WIDTH  &&
+  Nat.eqb (jpl_word      jpl_caps_table) MAX_WORD   &&
+  Nat.eqb (jpl_argv      jpl_caps_table) MAX_ARGV   &&
+  Nat.eqb (jpl_env       jpl_caps_table) MAX_ENV    &&
+  Nat.eqb (jpl_list      jpl_caps_table) MAX_LIST   &&
+  Nat.eqb (jpl_cmd       jpl_caps_table) MAX_CMD    &&
+  Nat.eqb (jpl_stack     jpl_caps_table) MAX_STACK  &&
+  Nat.eqb (jpl_glob_fuel jpl_caps_table) GLOB_FUEL  &&
+  Nat.eqb (jpl_fuel      jpl_caps_table) MAX_FUEL   &&
+  Nat.leb (jpl_width     jpl_caps_table) (jpl_word jpl_caps_table) &&
+  Nat.leb (jpl_argv      jpl_caps_table) (jpl_env jpl_caps_table) &&
+  Nat.leb (jpl_env       jpl_caps_table) (jpl_list jpl_caps_table) &&
+  Nat.leb (jpl_list      jpl_caps_table) (jpl_cmd jpl_caps_table) &&
+  Nat.leb (jpl_cmd       jpl_caps_table) (jpl_stack jpl_caps_table) &&
+  Nat.leb (jpl_stack     jpl_caps_table) (jpl_glob_fuel jpl_caps_table) &&
+  Nat.leb (jpl_glob_fuel jpl_caps_table) (jpl_fuel jpl_caps_table).
+
+Lemma jpl_caps_are_locked : jpl_caps_okb = true.
+Proof. vm_compute. reflexivity. Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
    §2  Saturate-to-error result plumbing
@@ -197,6 +357,12 @@ Proof.
   - destruct (Nat.leb f MAX_FUEL) eqn:E; [ reflexivity | apply Nat.leb_gt in E; lia ].
 Qed.
 
+(* The gate accepts exactly the scan budget §1 introduced: a machine handed
+   GLOB_FUEL is not refused.  Without the raised MAX_FUEL this was BLimit — that
+   is the whole content of the 2026-10-04 budget increase. *)
+Lemma b_fuel_accepts_glob_fuel : b_fuel GLOB_FUEL = BOk GLOB_FUEL.
+Proof. apply (proj2 (b_fuel_ok GLOB_FUEL)); apply (proj2 cap_fuel_order). Qed.
+
 (* ═══════════════════════════════════════════════════════════════════
    §4  Bounded word: a byte array of capacity MAX_WORD carrying its length
 
@@ -274,10 +440,17 @@ Qed.
 (* ═══════════════════════════════════════════════════════════════════
    §5  Bounded environment: an array of (name,value) word pairs up to MAX_ENV
 
-   Lookup is the concrete getv (a total tail scan, no allocation, so never
-   saturates).  Update is bounded: setv either replaces (length unchanged) or
-   prepends (length + 1); benv_setv refuses only when that result would exceed
-   MAX_ENV, so a full map cannot grow past its capacity.
+   Lookup is the concrete getv: tail-recursive in its map argument and
+   allocation-free, so it never saturates.  Update is bounded: setv either
+   replaces in place (length unchanged) or appends the new binding at the end
+   (length + 1); benv_setv refuses only when that result would exceed MAX_ENV,
+   so a full map cannot grow past its capacity.
+
+   Both carry `sh_concrete`'s `Fixpoint` shape, so Extraction emits `let rec`
+   for them -- JPL Rule 6 recursion, and no fuel slot to report saturation in.
+   The emitter-lowerable forms are the fuel-bounded tail loops `getv_it` /
+   `setv_it` in `sh_jpl_scan.v` §5, which this file's `benv` API is proved to
+   agree with; `be_getv` / `be_setv` are what extraction should consume.
    ═══════════════════════════════════════════════════════════════════ *)
 
 Record benv : Type := BE { be_pairs : list (text * text); be_len : nat }.

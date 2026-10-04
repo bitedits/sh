@@ -1,8 +1,15 @@
-; Vendored Coq Extraction of verify/models/sh_concrete.v (single source of truth).
-; DO NOT EDIT BY HAND — regenerated from the .v model and byte-checked against a
-; fresh extraction by verify_models.sh.  wrapped=false exposes the extracted
-; module directly as Sh_run; warnings are silenced because generated code is not
-; ours to lint.
+; Vendored Coq Extraction artifacts — DO NOT EDIT BY HAND.  Each is regenerated
+; from its .v model and byte-checked against a fresh extraction by
+; verify_models.sh, which FAILS if a copy here has drifted:
+;   sh_run.ml       <- sh_extract.v       (sh_concrete.v: the recursive reference run)
+;   sh_run_iter.ml  <- sh_extract_iter.v  (sh_jpl_run.v: step + tail driver mloop)
+;   sh_run_c.ml     <- sh_extract_jpl_c.v (phase3 + scan + sh_jpl_run_c: the closure-free
+;                                          mrun AND the rewired mrun_c, whose case/for/assign
+;                                          sites reach the OS seam only through the proved
+;                                          tail loops, with JPL target settings — nat as
+;                                          machine int, stdlib arithmetic hooked to primitives)
+; wrapped=false exposes each module directly (Sh_run, Sh_run_iter, Sh_run_c);
+; warnings are silenced because generated code is not ours to lint.
 (library
  (name sh_kernel)
  (wrapped false)
