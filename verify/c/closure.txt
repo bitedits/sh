@@ -1,0 +1,195 @@
+INPUT      src/kernel/sh_run_c.ml
+           src/kernel/sh_run_c.mli
+artifact   87 bindings, 81 typed signatures, 15 type declarations
+
+==== CLOSURE MEMBERS (artifact order) ====
+  name                 arity rec  nat-match  self  signature
+  length               0     yes  0          1     'a1 list -> int
+  app                  2     yes  0          1     'a1 list -> 'a1 list -> 'a1 list
+  add                  0     yes  0          0     int -> int -> int
+  mul                  0     yes  0          0     int -> int -> int
+  rev                  0     yes  0          1     'a1 list -> 'a1 list
+  rev_append           2     yes  0          1     'a1 list -> 'a1 list -> 'a1 list
+  forallb              1     yes  0          1     ('a1 -> bool) -> 'a1 list -> bool
+  teqb                 2     yes  0          1     text -> text -> bool
+  bstat                1     no   0          0     int -> int
+  getv                 1     yes  0          1     text -> (text * text) list -> text option
+  b_dollar             0     no   0          0     int
+  b_lbrace             0     no   0          0     int
+  b_rbrace             0     no   0          0     int
+  b_qmark              0     no   0          0     int
+  b_uscore             0     no   0          0     int
+  b_0                  0     no   0          0     int
+  is_digit             1     no   0          0     int -> bool
+  is_alpha             1     no   0          0     int -> bool
+  is_name              1     no   0          0     int -> bool
+  nat_digits           3     yes  1          1     int -> int -> text -> text
+  nat2text             1     no   1          0     int -> text
+  b_star               0     no   0          0     int
+  mAX_WORD             0     no   0          0     int
+  mAX_LIST             0     no   0          0     int
+  gLOB_FUEL            0     no   0          0     int
+  mAX_FUEL             0     no   0          0     int
+  raw_bword            1     no   0          0     text -> bword
+  isz                  1     no   0          0     cstate -> bool
+  enter_seq            4     no   1          0     int -> cmd list -> cstate -> stack -> out
+  glob_it              4     yes  1          5     int -> text -> text -> (text * text) option -> bool
+  glob_iter            3     no   0          0     int -> text -> text -> bool
+  match_any_iter       3     yes  1          1     int -> text list -> text -> bool
+  branch_need          2     yes  0          1     text list -> text -> int
+  branch_guardb        3     no   0          0     int -> text list -> text -> bool
+  setv_it              5     yes  1          1     int -> text -> text -> (text * text) list -> (text * text) list -> (text * text) list option
+  ek_value             2     no   0          0     (text * text) list -> text -> text
+  expand_go            4     yes  1          9     int -> (text * text) list -> int -> exp_k -> text
+  expand_it            4     no   0          0     int -> (text * text) list -> int -> text -> text
+  expand_c             4     no   0          0     int -> (text * text) list -> int -> text -> bword bres
+  assign_c             4     no   0          0     text -> text -> stack -> cstate -> out
+  bind_word_o          4     no   0          0     int -> text -> text -> cstate -> cstate option
+  enter_for_c          6     no   1          0     int -> text -> text list -> cmd list -> cstate -> stack -> out
+  enter_case_c         5     yes  1          1     int -> text -> (text list * cmd list) list -> cstate -> stack -> out
+  step_cmd_c           4     no   1          0     int -> cmd -> stack -> cstate -> out
+  step_ret_c           2     no   0          0     stack -> cstate -> out
+  step_c               1     no   0          0     cfg -> out
+  mrun_c               2     yes  1          1     int -> cfg -> dres
+
+roots      mrun_c, step_c  ->  47 bindings, 17 recursive
+           mutual let-rec groups in the whole file: 2
+
+==== EXPRESSION CLASSES IN THE CLOSURE ====
+  ident                              7068
+  apply                              6572
+  construct                          163
+  function                           68
+  constant                           61
+  tuple                              43
+  record                             42
+  match                              40
+  if                                 32
+  field                              28
+  let                                11
+
+==== PATTERN CLASSES IN THE CLOSURE ====
+  var                                253
+  construct                          107
+  tuple                              54
+  any                                24
+
+==== SUBSET VERDICT ====
+  emitter supports expressions: ident, constant, function, apply, match, if, let, tuple, construct, variant, record, field
+  emitter supports patterns:    any, var, constant, tuple, construct, variant, or
+
+SUBSET OK: the shipped closure is inside the emitter's subset.
+
+==== ALLOCATION SITES IN THE CLOSURE (sizes the memory-model decision) ====
+  literal: nat                       61
+  tuple (value cell)                 43
+  record (4 fields)                  35
+  ctor Onext                         25
+  cons  (one value cell)             24
+  option Some                        23
+  option None                        15
+  ctor false                         12
+  nil   (no cell)                    12
+  unit                               11
+  ctor Olimit                        8
+  record (2 fields)                  7
+  ctor EMain                         6
+  ctor true                          4
+  ctor DLim                          2
+  ctor EBrace                        2
+  ctor EName                         2
+  ctor Oeffect                       2
+  ctor BLimit                        1
+  ctor BOk                           1
+  ctor DDone                         1
+  ctor DEff                          1
+  ctor FAnd                          1
+  ctor FBang                         1
+  ctor FForRest                      1
+  ctor FIf                           1
+  ctor FOr                           1
+  ctor FSeq                          1
+  ctor FSeqList                      1
+  ctor FWhile                        1
+  ctor FWhileBody                    1
+  ctor Odone                         1
+  ctor While                         1
+
+==== VALUE CONSTRUCTORS USED IN THE CLOSURE ====
+  pat ::                             28
+  pat []                             28
+  Onext                              25
+  ::                                 24
+  Some                               23
+  None                               15
+  []                                 12
+  false                              12
+  ()                                 11
+  pat None                           9
+  pat Some                           9
+  Olimit                             8
+  EMain                              6
+  true                               4
+  DLim                               2
+  EBrace                             2
+  EName                              2
+  Oeffect                            2
+  pat Assign                         2
+  pat EName                          2
+  pat Ext                            2
+  pat Skip                           2
+  BLimit                             1
+  BOk                                1
+  DDone                              1
+  DEff                               1
+  FAnd                               1
+  FBang                              1
+  FForRest                           1
+  FIf                                1
+  FOr                                1
+  FSeq                               1
+  FSeqList                           1
+  FWhile                             1
+  FWhileBody                         1
+  Odone                              1
+  While                              1
+  pat And                            1
+  pat BLimit                         1
+  pat BOk                            1
+  pat Bang                           1
+  pat Case                           1
+  pat EBrace                         1
+  pat EMain                          1
+  pat FAnd                           1
+  pat FBang                          1
+  pat FForRest                       1
+  pat FIf                            1
+  pat FOr                            1
+  pat FSeq                           1
+  pat FSeqList                       1
+  pat FWhile                         1
+  pat FWhileBody                     1
+  pat For                            1
+  pat If                             1
+  pat Odone                          1
+  pat Oeffect                        1
+  pat Olimit                         1
+  pat Onext                          1
+  pat Or                             1
+  pat Seq                            1
+  pat While                          1
+
+==== TYPE VOCABULARY THE CLOSURE NEEDS (the layout table's domain) ====
+  stack        abstract = frame list
+  bword        record of bw_bytes:text, bw_len:int
+  dres         variant of DDone/1, DEff/4, DLim
+  text         abstract = int list
+  frame        variant of FSeq/2, FAnd/2, FOr/2, FBang, FIf/3, FWhile/3, FWhileBody/3, FSeqList/2, FForRest/4
+  exp_mode     variant of EMain, EName, EBrace
+  cmd          variant of Skip, Ext/2, Assign/2, Seq/2, And/2, Or/2, Bang/1, If/3, While/2, For/3, Case/2
+  bres         variant of BOk/1, BLimit
+  out          variant of Onext/1, Oeffect/4, Odone/1, Olimit
+  exp_k        record of ek_mode:exp_mode, ek_inp:text, ek_out:text, ek_name:text
+  cfg          record of cf:int, cc:cmd option, ck:stack, cs:cstate
+  cstate       record of cstatus:int, cenv:(text * text) list
+  (builtins)   int x59, list x41, bool x11, option x5

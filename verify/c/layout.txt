@@ -1,0 +1,109 @@
+INPUT      src/kernel/sh_run_c.ml
+           src/kernel/sh_run_c.mli
+artifact   87 bindings, 81 typed signatures, 15 type declarations
+
+==== CAPACITIES, FOLDED OUT OF THE ARTIFACT'S jpl_caps_table ====
+  jpl_width      MAX_WIDTH     JPL_MAX_WIDTH            32   bits in the fixed-width word
+  jpl_word       MAX_WORD      JPL_MAX_WORD            256   codes per word (text length)
+  jpl_argv       MAX_ARGV      JPL_MAX_ARGV             64   argument words per simple command
+  jpl_env        MAX_ENV       JPL_MAX_ENV             128   simultaneously live shell variables
+  jpl_list       MAX_LIST      JPL_MAX_LIST           1024   any intermediate list length
+  jpl_cmd        MAX_CMD       JPL_MAX_CMD            4096   node pool for one lowered cmd tree
+  jpl_stack      MAX_STACK     JPL_MAX_STACK          8192   explicit machine stack frames
+  jpl_glob_fuel  GLOB_FUEL     JPL_GLOB_FUEL        132353   iterations of one full-width scan
+  jpl_fuel       MAX_FUEL      JPL_MAX_FUEL         136449   iterations the machine may run at all
+
+==== LAYOUT TABLE (the vocabulary the shipped closure reaches) ====
+  C type                     rule                      bytes  components
+  jpl_nat                    scalar                        4  -
+  jpl_bool                   scalar                        4  -
+  jpl_unit                   scalar                        4  -
+  jpl_ref                    scalar                        4  -
+  jpl_wref                   word handle                   4  jpl_ref
+  jpl_text                   word (pool element)        1028  len + code[JPL_MAX_WORD]
+  jpl_opt_text               by-value tagged               8  opt of jpl_wref
+  jpl_pair_text_text         by-value pair                 8  jpl_wref + jpl_wref
+  jpl_pair_text_text_list    list handle                   4  jpl_pair_text_text_list
+  jpl_pair_text_text_list_cell cons cell (pool element)       12  jpl_pair_text_text + next
+  jpl_bword                  record (by value)             8  jpl_wref+jpl_nat
+  jpl_cstate                 record (by value)             8  jpl_nat+jpl_pair_text_text_list
+  jpl_cmd                    node handle                   4  jpl_ref
+  jpl_cmd_node               pooled node                  16  tag + 3 slots
+  jpl_text_list              list handle                   4  jpl_text_list
+  jpl_text_list_cell         cons cell (pool element)        8  jpl_wref + next
+  jpl_cmd_list               list handle                   4  jpl_cmd_list
+  jpl_cmd_list_cell          cons cell (pool element)        8  jpl_cmd + next
+  jpl_pair_text_list_cmd_list by-value pair                 8  jpl_text_list + jpl_cmd_list
+  jpl_pair_text_list_cmd_list_list list handle                   4  jpl_pair_text_list_cmd_list_list
+  jpl_pair_text_list_cmd_list_list_cell cons cell (pool element)       12  jpl_pair_text_list_cmd_list + next
+  jpl_opt_cmd                by-value tagged               8  opt of jpl_cmd
+  jpl_frame                  node handle                   4  jpl_ref
+  jpl_frame_node             pooled node                  20  tag + 4 slots
+  jpl_frame_list             list handle                   4  jpl_frame_list
+  jpl_frame_list_cell        cons cell (pool element)        8  jpl_frame + next
+  jpl_cfg                    record (by value)            24  jpl_nat+jpl_opt_cmd+jpl_frame_list+jpl_cstate
+  jpl_out_Onext              by-value payload             24  jpl_cfg
+  jpl_out_Oeffect            by-value payload             20  jpl_nat+jpl_text_list+jpl_frame_list+jpl_cstate
+  jpl_out_Odone              by-value payload              8  jpl_cstate
+  jpl_out                    fat variant (by value)       56  tag + 3 payloads
+  jpl_opt_pair_text_text     by-value tagged              12  opt of jpl_pair_text_text
+  jpl_opt_pair_text_text_list by-value tagged               8  opt of jpl_pair_text_text_list
+  jpl_exp_mode               enum                          4  EMain|EName|EBrace
+  jpl_exp_k                  record (by value)            16  jpl_exp_mode+jpl_wref+jpl_wref+jpl_wref
+  jpl_bres_bword             by-value tagged              12  bres of jpl_bword
+  jpl_opt_cstate             by-value tagged              12  opt of jpl_cstate
+  jpl_dres_DDone             by-value payload              8  jpl_cstate
+  jpl_dres_DEff              by-value payload             20  jpl_nat+jpl_text_list+jpl_frame_list+jpl_cstate
+  jpl_dres                   fat variant (by value)       32  tag + 2 payloads
+
+  40 C types emitted: 27 each followed by its own sizeof check, the
+  other 13 one-word typedefs (R1 scalars, R3 handles, R7's all-nullary variant)
+  covered by jpl_check_one_word_families — no emitted type's size is left to the
+  reader.
+
+==== DOMAIN CHECK (the reporter's vocabulary vs this emitter's layout) ====
+  11 declared vocabulary types carry no parameters, and each reached a
+  layout rule: bword, cfg, cmd, cstate, dres, exp_k, exp_mode, frame, out, stack, text
+  main's check is bidirectional: a vocabulary type with no rule, or a laid
+  out type the closure does not reach, is a hard failure (exit 2).
+
+==== STATIC POOLS (cells x cell size, from the caps above) ====
+  array                      element                     cells      bytes         size  sized from
+  jpl_word_pool              jpl_text                  PENDING       1028 1.0 KiB per word  (no cap bounds it)
+  jpl_pair_text_text_list_pool jpl_pair_text_text_list_cell      256       3072      3.0 KiB  JPL_MAX_ENV
+  jpl_text_list_pool         jpl_text_list_cell           2048      16384     16.0 KiB  JPL_MAX_LIST
+  jpl_cmd_list_pool          jpl_cmd_list_cell            2048      16384     16.0 KiB  JPL_MAX_LIST
+  jpl_pair_text_list_cmd_list_list_pool jpl_pair_text_list_cmd_list_list_cell     2048      24576     24.0 KiB  JPL_MAX_LIST
+  jpl_frame_list_pool        jpl_frame_list_cell         16384     131072    128.0 KiB  JPL_MAX_STACK
+
+  bounded static total  187.0 KiB (191488 bytes), excluding the unsized pools
+
+==== WHAT THIS LAYER COULD NOT SIZE ====
+  jpl_word_pool (element 1028 bytes) has no capacity in the cap table.
+     words are reachable from cmd nodes (Ext, For and Case patterns hold them),
+         so they are bounded only by a PRODUCT of caps, and no entry of the LOCKED
+         cap table is the capacity of a word.  The model has to add one (see the
+         report's range) before this array can be sized; inventing a dimension here
+         would be the parallel encoding this pipeline retires.
+     What the locked caps DO imply, as a range of live words:
+       lower       4096 words (one per cmd node)                = 4112.0 KiB
+       upper    4194304 words (every node owning a full list)   = 4210688.0 KiB
+     The model must fix one number in that range and prove it.  Nothing
+     in the header allocates against a guess.
+
+
+==== THE THREE NON-DERIVED CHOICES ====
+  1. pooled types            cmd, frame — from sh_jpl.v §1's cap comments;
+                             every other vocabulary type is by value and needs no capacity
+  2. list pool sizing        pair(text,text) -> JPL_MAX_ENV, frame list -> JPL_MAX_STACK,
+                             every other list kind -> JPL_MAX_LIST
+  3. headroom factor         2, pending JPL.5-B.3's allocation-bound proof
+
+==== FUNCTIONS AND VALUES ====
+  closure members         47
+  prototypes emitted      31
+  constant #defines       11
+  PENDING                 5
+
+==== FINDINGS ====
+  13 rows carry no sizeof check of their own and are covered conjunctively by jpl_check_one_word_families: jpl_nat, jpl_bool, jpl_unit, jpl_ref, jpl_wref, jpl_pair_text_text_list, jpl_cmd, jpl_text_list, jpl_cmd_list, jpl_pair_text_list_cmd_list_list, jpl_frame, jpl_frame_list, jpl_exp_mode
