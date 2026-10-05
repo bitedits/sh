@@ -502,9 +502,9 @@ let type_vocab members =
 (* The roots are a parameter, not a convention: the subset verdict — and with it
    JPL.6's Rule-6 (no recursion) verdict — binds the code we SHIP, so a caller must
    be able to name the shipped roots and watch the oracle cluster fall out.  That is
-   §9.2's decision 1, made mechanically instead of asserted.  Both consumers take the
-   same argument, so the parser and the default live here rather than being written
-   twice. *)
+   §9.2's decision 1, made mechanically instead of asserted.  All three consumers take the
+   same parameter, so the parser and the default live here rather than being written three
+   times. *)
 let split_commas str =
   let out = ref [] and cur = Buffer.create 16 in
   String.iter
@@ -610,6 +610,19 @@ let rec has_var = function
   | L_fun (a, b) -> has_var a || has_var b
   | _ -> false
 
+(* `has_fun` is the OTHER half of what R8 has to answer.  `has_var` says an instance is
+   closed — every variable resolved — and a closed instance is the condition under which
+   one C function exists for it.  It is not sufficient: a resolved instance can still be
+   a function-typed VALUE, and D-60411's ban on function pointers means such a parameter
+   has no C type at all.  `tn` refuses one, which is right for the representation layer
+   and fatal for a rung that must REPORT the case, so the refusal is exposed here as a
+   predicate instead of an exception. *)
+let rec has_fun = function
+  | L_fun _ -> true
+  | L_list a | L_opt a | L_bres a -> has_fun a
+  | L_pair (a, b) -> has_fun a || has_fun b
+  | _ -> false
+
 (* The one TYPE EQUATION the artifact states outright: `type text = int list`
    (sh_run_c.mli).  R2 gives `text` the ARRAY representation, so a value the code
    builds with `::`/`[]` at element `int` is not a cons list — it is a word under
@@ -658,6 +671,16 @@ let rec tn = function
   | L_unk w -> fail ("tn: an un-inferable type reached the layout: " ^ w)
 
 let show_lt t = tn t
+
+(* The C NAME of a value of this layout type, in one place.  The representation layer
+   (jpl_emit.ml) registers the same rule where it lays `text` out: a text VALUE is a
+   word-slab handle, so it is `jpl_wref`, while `jpl_text` names the storage the handle
+   points into.  Every other type's value name is `jpl_` prefixed to its canonical
+   layout name.  The census's 5-B.3b ABI renders its instance prototypes through this,
+   because a second copy of the exception would be a second reading of §6.2's R2 — and
+   the gate's C compile is what catches the case where the header and this name stop
+   agreeing. *)
+let value_name t = match t with L_word -> "jpl_wref" | _ -> "jpl_" ^ tn t
 
 (* A signature's arrow spine, read off the .mli's core_type. *)
 let rec arrow_spine acc (t : core_type) =

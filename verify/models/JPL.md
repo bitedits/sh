@@ -24,6 +24,8 @@ re-architecture that sits on top of it.
 - [5. Recursion elimination — the small-step machine](#5-recursion-elimination--the-small-step-machine)
 - [6. Extraction contract](#6-extraction-contract)
   - [6.1 Established extraction behaviour](#61-established-extraction-behaviour)
+  - [6.2 The four choices the derived layers could not derive](#62-the-four-choices-the-derived-layers-could-not-derive)
+  - [6.3 The lowering schemas the census measured](#63-the-lowering-schemas-the-census-measured-normative-list-5-b3a)
 - [7. Verification: JPL lint gate (design)](#7-verification-jpl-lint-gate-design)
 - [8. Verification: differential gate (design)](#8-verification-differential-gate-design)
 - [9. Construction order (matches task list)](#9-construction-order-matches-task-list)
@@ -394,7 +396,7 @@ artifact rather than chosen:
 | R5 `(a * b)` | by-value struct `{ a fst; b snd; }` | the artifact builds only binary pairs; an n-ary tuple is refused rather than silently right-nested |
 | R6 a declared `record` | by-value struct, fields in declaration order | the `.mli` already fixes the shape |
 | R7 a declared `variant` | all-nullary → `uint32_t` enum; otherwise, if it is one of the **pooled** types → node `{ jpl_nat tag; jpl_nat slot[i]; }` with `i` = max ctor arity, every slot a single word; otherwise → *fat struct* `{ jpl_nat tag; <each ctor's payload, named> }` | JPL forbids unions, so a non-pooled variant carries every payload and the tag selects which mean anything; a pooled node exists because one cell must hold every constructor |
-| R8 a signature mentioning a type variable | **PENDING**, not emitted | monomorphization is JPL.5-B.3's call-site census (see above); inventing an instance here would be a second encoding of the choice |
+| R8 a signature mentioning a type variable | **PENDING**, not emitted | monomorphization is JPL.5-B.3's call-site census (see above); inventing an instance here would be a second encoding of the choice.  *[**5-B.3b-i** landed that census's consequence on 2026-10-05, in the tool that owns the instance set rather than here: the **6** closed instances become prototypes in `verify/c/sh_run_jpl_abi.h`, the **6** open ones are still PENDING exactly as this row says, and the one closed instance whose parameter is function-typed is **refused** — the alternative would be D-60411's forbidden function pointer (§6.3's ABI paragraph)]* |
 
 The rule set is applied mechanically, and the two places where it *refuses* are
 evidence of that: `of_ct` fails on a type outside the artifact's vocabulary, and
@@ -460,24 +462,100 @@ C `while` (decrement `f`, exit on `O`) is sound. Two obligations for the model/e
   inline `MAX_WORD` buffer for bytes or a handle into a static node pool for the
   recursive types.
 
-### 6.2 The three choices 5-B.2 could not derive
+### 6.2 The four choices the derived layers could not derive
 
 Everything in `verify/c/sh_run_jpl.h` is derived from a `.mli` line plus a capacity
 folded out of the `.ml`, **except** three decisions, which the emitter numbers the same
 way `verify/c/layout.txt` prints them so a reader can trace any number back to one of
 them.  They are recorded here rather than hidden in the tool because §2's single-source
 rule is about *semantics*: a layout choice is allowed to be a choice, as long as exactly
-one place owns it and it is stated.
+one place owns it and it is stated.  **5-B.3a (2026-10-05) added a fourth.**  It is not a
+choice about the header but a choice about *what may stand in for the live set* — the
+input decision 3 was waiting for — and the census's measured answer is that nothing in the
+artifact's text supplies it yet, so the placeholder stays rather than being replaced by an
+invented number.
 
 | # | choice | what was picked | why the artifact does not decide it |
 |---|---|---|---|
 | 1 | which declared types are **pooled** | `cmd`, `frame` — and each now also gets its **node pool**: `jpl_cmd_pool` of `MAX_CMD` cells × headroom, `jpl_frame_pool` of `MAX_STACK` × headroom, registered by the same rule (`node_layer`) that emits the node struct | `cmd` is forced (it reaches itself); `frame` is bounded in shape (4 fields) and could be by-value, but §1's cap comments describe a *frame pool* (`MAX_STACK` = "explicit machine stack frames"), and a by-value frame embedded in a list cell would size the stack pool by the widest constructor instead of by `MAX_STACK`.  Picking the comment over the smaller encoding is the one place where the model's *intent* outranks the layout's arithmetic.  The choice has two halves — the list of pooled names and the cap that sizes each — and 5-B.2c (2026-10-05) made them check each other: a name in `pooled_types` with no `pool_cap` entry is a hard refusal, because the silent alternative was a by-value layout of a type the decision says is pooled.  Before that fix the header dimensioned only the two types' *list* cells, so `cmd`/`frame` nodes were declared and never allocated |
 | 2 | which cap sizes which **list pool** | `pair(text,text)` → `MAX_ENV`; `frame` list → `MAX_STACK`; every other list kind → `MAX_LIST` | a list's cap depends on which list it is, and OCaml types do not carry that name.  The mapping is justified per kind by §5's `wf_benv` (an env is `MAX_ENV` pairs) and §1's `MAX_STACK` comment; the rest fall to `MAX_LIST` = "any intermediate list length" |
 | 3 | the pool **headroom** factor | 2 | a pool must hold the live set *and* the garbage produced between step boundaries, and the per-step allocation bound is not yet established by proof or measurement (decision 3's open half).  So each pool is `cap × 2`, one doubling that is explicitly a placeholder until 5-B.3's allocation census replaces it with a measured number |
+| 4 | what number the placeholder is allowed to be replaced **by** (added by 5-B.3a, 2026-10-05) | nothing yet: the census reports **allocation sites** per pool (7 pools demanded, 309 allocation sites, 8 of them still type-variable) and states explicitly that a capacity is `sites × loop trips`, so the `× 2` stays a placeholder with a *named* owner — JPL.7's measured per-step high-water mark | a pool must hold the greatest number of cells **live at one step boundary**, and that is a property of executions, not of the artifact's text: no walk over the bytes can produce it, and reading the site count as an extent would be a silent substitution of a measurable number for the one that matters.  5-B.3a's obligation 1 is the refusal to make that substitution |
 
 Decision 3 is also why the header's pool sizes are `#define JPL_POOL_<KIND>` rather than
 bare dimensions: the factor appears once, in the emitter, and every cell count in the
-report is printed as "n cells × headroom 2" so the arithmetic is visible.
+report is printed as "n cells × headroom 2" so the arithmetic is visible.  Decision 4 is
+why the census's pool rows are headed "**sites** in a sig / built by" and never "cells":
+the same column that makes the demand check possible (`jpl_word_pool` demanded by 15 sites)
+is the column that cannot say how many words are live at a step boundary, and the report
+prints that limit as its own section rather than leaving it to the reader.
+
+### 6.3 The lowering schemas the census measured (normative list, 5-B.3a)
+
+§6.1 states what the emitter is *allowed* to lower (tail loops → `while`, length-bounded
+structural recursion → bounded copy loops).  5-B.3a measured what the shipped closure
+actually contains, and this list is now the normative input to 5-B.3b: a binding may be
+lowered by the schema its class names, and a binding in no class is a refusal, not an
+invention.  Counts are over roots `mrun_c,step_c` — **47** members, **17** of them defined
+by fixpoint — and are printed by `verify/c/jpl_lower.ml` into the tracked
+`verify/c/lowering.txt`, which gate block **2f** byte-compares.
+
+| class | count | lowering target, and why it is expressible without recursion |
+|---|---|---|
+| straight-line | 26 | ordinary statements: no self-call, so nothing to convert.  Includes the cap bindings themselves (`mAX_WORD`, `mAX_LIST`, `gLOB_FUEL`, `mAX_FUEL`), which are data and must not be read as code |
+| fuel tail loop | 7 | `while (fuel > 0) { fuel -= 1; body }` — the fuel arrives as a *parameter*, so the caller's bound is the loop's bound: `glob_it`, `match_any_iter`, `setv_it`, `expand_go`, `enter_case_c`, `mrun_c`, `nat_digits`.  Each row also names **where its first fuel comes from** (`parameter f (argument 1 of this binding)`), which is what makes the loop's bound a traced quantity rather than a guess |
+| fuel idiom, one trip (no self-call) | 4 | **no loop at all**: the `ExtrOcamlNatInt` nat-destruct value `(fun fO fS n -> if n=0 then fO () else fS (n-1))` is present but its step binder never calls the binding back, so it runs one trip and lowers to `if (n == 0)` (JPL.6 must not read it as recursion).  `nat2text`, `enter_seq`, `enter_for_c`, `step_cmd_c` — and `nat2text` is the case whose step binder is *unnamed*, so the decremented fuel is discarded |
+| structural tail loop | 3 | `while (handle != JPL_NIL) { cell = pool[handle]; body; handle = cell.next }` — decreases on a cons tail, whose length the enclosing case already bounds (`teqb`, `getv`, `rev_append`) |
+| `BOUNDED FOLD (non-tail)` | 5 | **rewrite required, model side.**  `length`, `app`, `rev`, `forallb` and `branch_need` recurse in a non-tail position, and D-60411 forbids recursion, so no `while` exists for them: each is a 5-A-style Coq obligation, not an emitter trick.  This is decision 3's other half — until it lands, 5-B.3b emits *declarations* for these five and no bodies |
+| operator alias | 2 | `add` → `+`, `mul` → `*` under the extraction hooks; they print as `let rec` and are dropped, which is why an inventory that counts them as recursions is wrong |
+
+The three readings that accompany the split are the ones JPL.6 and JPL.7 consume:
+
+- **R8's instance set, measured at the call sites**: 5 polymorphic bindings, **29** use
+  points, **6 closed** instances (one C function each) and **6 still open**.  Every open
+  instance is a *self*-use of a binding the interface itself declares polymorphic, so the
+  shipped closure never decides its layout and 5-B.3b must not either — the honest output
+  is the same PENDING the header already prints.
+- **First-class functions**: **68** lambda sites, each positioned in one of the four places
+  a lowering can absorb (a fuel continuation, an argument at a known call site, a redex
+  applied at its own site, or the binding's own value), and **0** sites in a position no
+  rule covers.  That zero is *asserted by the gate*, because a function value outside those
+  four could only become a function pointer, which D-60411 forbids.
+- **How the caps are enforced**: **4** comparisons against a locked cap (`branch_guardb`
+  ×3, `expand_c` ×1) and **3** caps *handed to a call instead of compared* (`MAX_FUEL` as
+  `setv_it`'s first argument twice, `GLOB_FUEL` as `match_any_iter`'s once, inside a
+  computed sum).  A cap with 0 comparisons is therefore not evidence of an unenforced cap —
+  which is the reason the census prints the handed column at all, and the reason
+  `MAX_STACK`'s **0** of either kind is a finding: nothing the emitter lowers bounds the
+  machine's stack depth (§6.2 decision 3's debt, 5-B.3a's obligation 3).
+
+**5-B.3b-i rendered the first half of this list: the ABI.**  The **6** closed instances the
+first reading above counts are now `verify/c/sh_run_jpl_abi.h`, and the rendering is a
+*declaration* layer and nothing more — which is what the table's `BOUNDED FOLD` row
+prescribes: **4** of the 6 carry that schema (3 declared with a body owed, the 4th not
+nameable at all) and the other **2** are `rev_append`'s two instances, structural tail loops
+§6.1 already licenses.  What the render measured about itself: **5** prototypes exist and **1**
+is **refused** — `forallb` at its single call site closes to `(text -> bool) -> text list ->
+bool`, so its parameter 1 is function-typed, no C type names it, and the only thing that
+could is the function pointer D-60411 forbids.  That refusal is *printed, not failed*,
+because `forallb` is already in the fold row above: a refusal with a named owner is a finding,
+and an unowned one (`abi_blocked_outside_fold_set`) is the assertion.  Two invariants hold the
+layer together.  **One naming rule**: the C type names in the ABI come from `jpl_ast.ml`'s
+`value_name`, which `jpl_emit.ml` now calls for its own typedefs too, so 2e's layout header
+and 2f's ABI header cannot state two variants of R1–R4.  **Closed accounting**: block 2f
+asserts `abi_instances == instances_closed`, prototypes + refusals == rendered, expressible +
+owed == prototypes, compares those three against the rendered file's own declaration, refusal
+and declaration-only comment lines, and then compiles the header *pair* under 2e's flags.  The
+compile is the rung with unique teeth: a scratch experiment that made `value_name` return a
+name the layout header never typedef'd left **every** SUMMARY count identical and failed only
+at the compiler — which is why the accounting alone would not have been a gate.
+
+**What the census cannot answer, and who owns it.**  Extent vs site count is decision 4
+above; the five non-tail folds are model-side rewrites; the stack-depth guard is either a
+saturating check 5-B.3b emits or a bound `sh_jpl_run.v` proves; the 8 allocation sites that
+still carry a type variable yield no representation from their own text.  All four are
+printed inside `lowering.txt` under "WHAT THIS CENSUS CANNOT ANSWER", so a stage cannot be
+reported as closed by a measurement that does not measure it.
 
 ## 7. Verification: JPL lint gate (design)
 
@@ -546,7 +624,9 @@ recursive set.  `verify/c/closure.txt` is now the authoritative inventory.]* = *
 | 5-B.2 · #39 | **Representation layer**: turn §6's rules R1–R8 into the C99 header the host will compile against — every reached type laid out, every size and every cap relation enforced by the *compiler* rather than asserted by a comment | `verify/c/jpl_emit.ml` + `verify/c/jpl_ast.ml` (shared reader), `verify/c/jpl_emit.sh` (runner: build + emit, `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only`, differential cap fold against the OCaml runtime, byte-compare of the vendored evidence), vendored `verify/c/sh_run_jpl.h` (365 lines) + `verify/c/layout.txt` (109 lines) — **DONE (2026-10-04)**.  *Evidence*: **gate 13/13 → 15/15** — block **2e** runs all four checks over the bytes block 2c bound to a fresh Extraction, block **2e-negative** asserts the oracle roots are *refused for the layout reason* (`a function-typed value has no layout`, on `run`'s `run_phi` driver parameter), which is a different root-sensitivity verdict than 2d-negative's mutual-fixpoint refusal.  40 C types emitted; **34 compile-time assertions** cover them all — 27 aggregate rows each followed by its own `sizeof` check, 13 one-word typedefs (scalars, handles, the all-nullary variant) covered conjunctively by `jpl_check_one_word_families`, plus the 5 cap relations and the word-width check; 31 prototypes emitted, **5 PENDING** (the polymorphic bindings, with their caller counts, because R8 refuses to invent an instance), and 5 bounded static pools totalling **187.0 KiB**.  *What this layer measured and §6 now records*: five shipped functions need monomorphization (`length, app, rev, rev_append, forallb`, 2–6 call sites each); only `cmd` reaches itself, so §6's "recursive types" sentence needed halving; and **the word slab cannot be sized** — no cap bounds the number of live `text` values, so `jpl_word_pool[]` is declared without a dimension and the model owes a `MAX_WORDS` before 5-B.3 can link (see §6, §6.2, and decision 3).  *[Both halves of that last claim were superseded on 2026-10-05 by **5-B.2b**: `sh_jpl.v` §1 gained `MAX_WORDS` with §7.1/§5 behind it, §1.1 exported it as the table's tenth field, and `jpl_word_pool` is now dimensioned — the "cannot link" consequence is gone.  The measurement that produced the claim still stands and is the reason the fix was a model change: no LOCKED cap *is* a word count.]*  *Self-correction on the same day*: the report's first line claimed "40 C types emitted, each followed by a sizeof check", which the header disproved (27 of 40); the claim is now measured by the emitter itself and the family assertion closes the gap, so no emitted type's size is unverified |
 | 5-B.2b · #40 | **`MAX_WORDS`: size the last undimensioned pool from the model, not the emitter.**  5-B.2 left `jpl_word_pool[]` declared without a dimension because no LOCKED cap *is* the number of live `text` cells, and this section's predecessor argument (a `MAX_CMD × MAX_LIST` product) was **per-node and wrong** — `cmd_fits` gates the whole tree, so a tree that fits has at most `2·MAX_CMD` word occurrences.  The stage therefore did not invent a number: it added the two counters the bound needs (`sh_jpl.v` §7.1 `cmd_words`, the honest word-occurrence count; §5 `benv_words`, name+value cells), proved `cmd_words ≤ 2·cmd_count` for the *same* fuel with the attainment exhibited (`Assign` costs 2 words for 1 node, so no tighter uniform factor exists), reflected it through `cmd_fits` into `cmd_fits_words`, placed the constant with `cap_words_order`/`MAX_WORDS_lt_fuel`, and exported it as `jpl_caps_table`'s tenth field so the emitter reads it from the artifact like the other nine | `verify/models/sh_jpl.v` §1 (`MAX_WORDS`, `cap_words_order`, `MAX_WORDS_lt_fuel`), §1.1 (`jpl_words` field, `jpl_caps_okb`, the order chain `jpl_stack ≤ jpl_words ≤ jpl_glob_fuel`), §5 (`benv_words`, `benv_words_le`), §7.1 (`cmd_words_list`/`_pair`/`_pairs`/`cmd_words`, `cmd_words_le_count`, `cmd_fits_unfold`, `cmd_fits_le`, `cmd_fits_words`, 2 attainment Examples); `verify/c/jpl_emit.ml` (`c_words`, the `jpl_words` cap row, `word_layer` sized `headroom × MAX_WORDS`, the two new C assertions `jpl_check_words_is_the_named_sum`/`jpl_check_words_order`, and a "could not size" section that now reports *nothing* undimensioned); `verify/c/jpl_emit.sh` (ten-field probe, guard `9`→`10`); `verify/models/verify_models.sh` block 2e's printed slab line — **DONE (2026-10-05)**.  *Evidence*: gate **15/15** (no new rung; block 2e's differential fold now agrees on **ten** capacities, `jpl_words 16642`, across the emitter's syntactic fold, the OCaml runtime evaluating `jpl_caps_table`, and the emitted `#define`s; block 2d still byte-compares `closure.txt`), `coqc sh_jpl.v` **8.6 s** with `coqchk -o -silent` four `<none>`, parity **66** unchanged, `conformance.sh` **33/33**, header **370 lines / 36 compile-time assertions** and it passes the JPL flag set, six pools dimensioned, bounded static total **33 601.0 KiB** of which the slab is **33 414.0 KiB** (33 284 cells × 1 028 B), report PENDING now **5** (R8's polymorphic bindings only).  *Measured side-effects, both recorded rather than assumed*: the artifact grew **87 → 89** bindings (`mAX_WORDS`, `benv_words`) while the *shipped closure* over roots `mrun_c,step_c` stayed **byte-identical** — the new constants are data outside the control-flow closure, so the lowering pass never sees `MAX_WORDS`, and only the folded numeral reaches C; and `MAX_WORDS`'s `Nat.add` spelling extracts as a call of the artifact's **recursive** `Nat.add` (`ExtrOcamlNatInt` hooks `+`/`*`/`-`/`div`/`modulo`/`divmod`/`max`/`eqb`/`leb` but *not* the qualified `Nat.add` form), i.e. the value 16 642 is produced by 8 192-deep non-tail recursion at module init — correct as measured, and a fact JPL.6's artifact-side census must not mistake for a reachable recursion.  *What this stage does NOT close*: the second `MAX_STACK` summand, whose condition "at most one live frame per source node" is named in §6 and still unwritten (if 5-B.3 refutes it, `MAX_WORDS` rises and the caps table + header re-pin together), and §6.2's headroom factor 2, still a placeholder until the allocation census.  *Proof-engineering finding, recorded because the two spellings prove the same fact and only one is buildable*: the first version of `cmd_fits_words` used `unfold cmd_fits in Hf` and made `sh_jpl.v` exceed **600 s**; isolating it measured the cost as **>45 s at fuel 128 as well as at 4096** (so it is not the numeral), while `rewrite cmd_fits_unfold in Hf` over the identical equation is **5.1 s** — comparing a *term* against its own delta short-circuits, comparing the two sides across an `eq bool … true` forces the fuel-bounded fixpoint to be reduced under all eleven `cmd` branches.  The file carries the four measurements at §7.1 |
 | 5-B.2c | **Make §6.2's decision 1 mean what it says, and put the shared reading in one file.**  Two things this stage found while scoping 5-B.3, both of which would have become bugs in the lowering pass rather than bugs here: **(i)** the emitter declared `cmd`/`frame` *pooled* and then dimensioned only their **list** cells — `sh_run_jpl.h` had 6 `extern` pools and no `jpl_cmd_pool`/`jpl_frame_pool`, so a host linking the node encoding would have had nowhere to allocate a node.  **(ii)** the value-type view (`of_ct`), the constant folder and the cap-table reader lived inside `jpl_emit.ml`, and 5-B.3 needs exactly those three — a second copy in a third tool is the parallel-encoding failure §2 forbids, and two AST walks over one `.mli` is how a transpiler starts disagreeing with its own gate | `verify/c/jpl_emit.ml` (`pool_cap` now yields `(cells, cap macro, why)`; `node_layer` registers its own pool from that triple, so the struct and its allocation are emitted by one rule; `named_layer` refuses a name in `pooled_types` that `pool_cap` does not size, replacing a silent fall-through to `fat_layer`; the report's decision-1 section prints each pooled type's pool and cap macro instead of a hand-typed sentence); `verify/c/jpl_ast.ml` §8-§10 (the shared value-type view, constant folder and cap-table reader, moved out of the emitter — one reader, three consumers: `jpl_front.ml`, `jpl_emit.ml`, `jpl_lower.ml`); `verify/c/jpl_emit.ml` shrank 1074 → 879 lines — vendored `verify/c/sh_run_jpl.h` (376 lines, 76 `typedef`s, 63 `#define`s, **8** `extern` pools, 36 assertions) + `verify/c/layout.txt` (118 lines) re-pinned — **DONE (2026-10-05)**.  *Evidence*: gate **15/15** (block 2e's four checks unchanged in kind: emission, C99 compile of the widened header, the ten-capacity differential fold, byte-compare — and 2e-negative still refuses the oracle roots for the function-typed reason); bounded static total **34 049.0 KiB**, of which the slab **33 414.0 KiB** (98 %) and the two new node pools **448.0 KiB** (`jpl_cmd_pool` 8 192 cells × 16 B, `jpl_frame_pool` 16 384 × 20 B).  *The refactor's own check*: moving §1-§3 of the emitter into the shared reader was verified by re-running the emitter and requiring the vendored bytes to be **identical**, so "same reading" is measured, not claimed.  *Why the node sizes are what they are*: a `jpl_cmd_node` is tag + 4 slots (max ctor arity) = 16 B, a `jpl_frame_node` tag + 4 = 20 B with padding to 20, each followed by its own `jpl_check_*_is_<N>` typedef, so both are compiler-checked.  *What this stage does NOT close*: the headroom 2 on these two pools is the same placeholder decision 3 carries for the other six — the node pools get their per-step allocation census from 5-B.3a, and if it refutes 2 the factor changes for all eight at once |
-| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2, re-pinned by 5-B.2b and 5-B.2c) is gated green as `sh_run_jpl.h`, and the capacity that half was waiting on landed as 5-B.2b; the lowering half (5-B.3: the tail loops → `while`, the bounded structural recursions → copy loops, R8's monomorphization census — the loop/recursion split quoted here as "6 + 9" is 5-B.1's estimate and 5-B.3a re-measures it) is what remains.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate** |
+| 5-B.3a · #41 | **The lowering census: measure the shape before writing any of it.**  *This stage* emits no C — it measures, deciding the four things the emitter cannot invent later — one lowering schema per shipped binding (self-call count, tail/non-tail split, the source of its first fuel), R8's instance set resolved at the call sites, where each of the 68 lambda values sits, and which pools the closure demands — plus the obligations the artifact's text cannot answer: extent vs site count, the non-tail folds, and that nothing shipped bounds stack depth | `verify/c/jpl_lower.ml` (the third of the shared `jpl_ast.ml` reader's three consumers), `verify/c/jpl_lower.sh`, vendored `verify/c/lowering.txt` — **DONE (2026-10-05)**.  *Evidence*: gate **15/15 → 17/17** — block **2f** plus **2f-negative**, which refuses the oracle roots as a **mutual fixpoint**, the third independent refusal reason over one artifact.  **47 members = 26 straight-line + 7 fuel tail loops + 4 one-trip fuel idioms + 3 structural tail loops + 5 `BOUNDED FOLD` + 2 aliases**, a split that **retired this table's own inherited estimate** ("6 + 2 + 9" in the 5-B.1 and 5-A.7 rows): there are 7 fuel loops because `nat_digits` is one, and 5 of the 8 recursions that remained have no `while` at any budget.  R8 measured, not assumed: 5 polymorphic bindings, 29 uses, **6 closed + 6 open** instances.  The runner takes every assertion from the report's **SUMMARY** keys and treats a missing key as a failure, because an absent measurement is not a zero.  *Two bugs the measurement caught in itself*: the instance walk first pushed the `.mli`'s **unfreshened** `'a1` into the shared store, so all five polymorphic bindings read one entry and the "instance set" measured whichever binding inference touched last; and recorded lambda sites stored instance names as **strings**, so one report printed two names for one variable.  See §6.2 decision 4, §6.3, and the HISTORY entry |
+| 5-B.3b-i · #41 | **The ABI: R8's closed set rendered as C declarations, and nothing more** — the half of 5-B.3b whose input the census had already measured completely.  Declarations only, because §6.3's `BOUNDED FOLD` row is not landed: its obligation now appears as a comment *in the emitted file* rather than as prose in the plan | `verify/c/jpl_lower.ml` §8b (`print_abi`/`write_abi` + 6 new SUMMARY keys), `verify/c/jpl_ast.ml` (`value_name`, `has_fun`), `verify/c/jpl_emit.ml` (its hard-coded `"jpl_wref"` replaced by that shared rule), `verify/c/jpl_lower.sh` checks 4–6, vendored `verify/c/sh_run_jpl_abi.h` (50 lines) — **DONE (2026-10-05)**.  *Evidence*: gate stays **17/17** with no new rung (2f gained the ABI accounting, the ABI compile, and the negative run's artifact-immutability assertion); `lowering.txt` **418 → 507 lines**, SUMMARY **18 → 24 keys**; `closure.txt`, `layout.txt` and `sh_run_jpl.h` **byte-unchanged**, so the ABI consumes the layout without editing it.  **5 prototypes + 1 refusal**, bodies **2 expressible / 3 owed**, `abi_blocked_outside_fold_set = 0`, and the header pair compiles under 2e's own flag set.  *Why the compile rung is not redundant with the accounting*: a scratch build in which `value_name` returned a name the layout header never typedef'd left **every** count identical and failed only at the compiler.  *Side finding*: `pr_lt` flattened arrow types, so the refused instance printed as `text -> bool -> text list -> bool` — a three-argument first-order function, i.e. the exact distinction the refusal under it makes; the printer now parenthesises a left-nested arrow the way OCaml's does.  *What it does NOT close*: 0 bodies (5-B.3b-ii), and `forallb`'s un-nameable instance — its only shipped use is an **inline lambda** inside `branch_guardb`, a binding the schema census calls straight-line, so 5-B.3b-ii owes that guard a model-side specialisation §6.3's fold row does not list |
+| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2, re-pinned by 5-B.2b and 5-B.2c) is gated green as `sh_run_jpl.h`, and the capacity that half was waiting on landed as 5-B.2b; the lowering half (5-B.3: the tail loops → `while`, the bounded structural recursions → copy loops, R8's monomorphization census — the loop/recursion split quoted here as "6 + 9" is 5-B.1's estimate, and 5-B.3a **re-measured** it as 7 fuel loops + 3 structural tail loops + 5 folds with no `while` at any budget) is **measured and half-emitted**: the census is gated as block 2f and R8's closed set is gated as the `sh_run_jpl_abi.h` declaration layer (5-B.3b-i), leaving **5-B.3b-ii — the bodies** as what remains.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate**, 5-B.3a lowering census, 5-B.3b-i ABI declarations |
 | JPL.6 · #26 | Mechanical D-60411 *shall*-rule lint gate on emitted C (`clang -std=c99 -Wall -Wextra -Wconversion -Werror` + static analyzer) | *`verify/c/jpl_lint.sh`* — pending |
 | JPL.7 · #27 | C host + differential conformance: C99 == extracted kernel == `/bin/sh` | *`verify/c/*`* + oracle `verify/src/conformance.sh`, `verify/src/cases` — pending |
 
@@ -569,10 +649,17 @@ tracker task status and this rollup must agree.
 
 | Bucket | Stages | Count |
 |---|---|---|
-| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39), 5-B.2b (#40) | 17 |
+| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39), 5-B.2b (#40), 5-B.2c, 5-B.3a (#41), 5-B.3b-i (#41) | 20 |
 | 🔵 IN PROGRESS | — | 0 |
-| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3 lowering), JPL.6 (#26), JPL.7 (#27) | 3 |
-| **Total** | | **20** |
+| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3b-ii, the bodies), JPL.6 (#26), JPL.7 (#27) | 3 |
+| **Total** | | **23** |
+
+*Rollup hygiene, recorded because the table was wrong before this edit*: **5-B.2c** and
+**5-B.3a** closed without ever joining this rollup or gaining a §9.1 row — each landed its
+evidence, its gate rung and its HISTORY entry, and the count just froze at 17 for two stages.
+That is the failure mode this section exists to prevent (a stage that reads as unnumbered reads
+as unstarted), so both are recorded now, beside the §9.1 rows added for them, rather than
+silently re-numbered backwards.
 
 The row that used to sit here — "⏳ UNNUMBERED follow-up: `expand_it`" — became numbered
 stage **5-A.7** and is now DONE, which is the only scan-side work that stood between the
@@ -646,7 +733,9 @@ must be handles into a static node pool, and the emitter's real open question na
 with the `free`-free answer (step-boundary copying collection) and the fact that its
 per-step allocation bound is not yet established by proof *or* measurement.
 
-**Current front:** JPL.5 (#25), and inside it **5-B.3 — the lowering half**.  L1–L8 are
+**Current front:** JPL.5 (#25), and inside it **5-B.3b-ii — the bodies**.  **5-B.3a**, the
+measurement that had to precede them, and **5-B.3b-i**, the ABI declarations that measurement
+already fully determined, both landed 2026-10-05.  L1–L8 are
 axiom-free and the shape JPL.5 reads is now the shape that is proved: `sh_run_c.ml`
 extracts from `sh_jpl_run_c.v` + `sh_jpl_run_phase3.v` + `sh_jpl_run.v` + `sh_jpl_scan.v`
 under the JPL settings, **66** parity checks bind it to the reference oracle, block 2c's
@@ -662,7 +751,12 @@ decision 1: `cmd` and `frame` were declared pooled but the header dimensioned on
 headroom) and `jpl_frame_pool` (`JPL_MAX_STACK` cells × headroom) — 8 `extern` pools, bounded
 total **34 049.0 KiB** — and the two halves of the decision are cross-checked by the emitter,
 which refuses a name in `pooled_types` that `pool_cap` does not size rather than letting it
-silently fall through to a by-value layout.  Of the decisions open at JPL.5's opening, two are
+silently fall through to a by-value layout.  Block **2f (5-B.3a + 5-B.3b-i)** reads the same
+closure for *shape* rather than layout — one lowering schema per binding, R8's instance set
+resolved at the call sites, the pools the closure demands, where every lambda value sits — and
+renders the **6** closed instances as `verify/c/sh_run_jpl_abi.h`, declarations only, which the
+gate compiles against 2e's header so the two cannot drift into two variants of one naming rule.
+Of the decisions open at JPL.5's opening, two are
 **settled by measurement** and one is **half-settled, with the remaining half now named by a
 missing bound rather than by a design choice**:
 
@@ -715,8 +809,8 @@ missing bound rather than by a design choice**:
    pool's order of magnitude, while the *per-step allocation* is what the differential
    harness has to *measure* (JPL.7), not assume.
    **5-B.2 (2026-10-04) settled the representation half by deriving it** — §6's rules R1–R8
-   are now `verify/c/sh_run_jpl.h`, gate block 2e checks it, and §6.2 numbers the three
-   choices the derivation could not make.  Two of 5-B.1's arithmetic inputs changed under
+   are now `verify/c/sh_run_jpl.h`, gate block 2e checks it, and §6.2 numbers the choices
+   the derivation could not make (three from 5-B.2; 5-B.3a added the fourth).  Two of 5-B.1's arithmetic inputs changed under
    measurement, and the header is the authority, not this paragraph: a `jpl_text` is
    **1028 B, not 260 B**, because R1 keeps every field one word and R2's codes stay
    `uint32_t` (the model *intends* each code `< 256` and never proves it, so narrowing to a
@@ -725,16 +819,22 @@ missing bound rather than by a design choice**:
    list, so 5-B.1's "half a MiB" is a *sum of single-kind bounds*, not a simultaneous worst
    case.  Measured instead, from the derived pools: the bounded static total is
    **187.0 KiB** (env 3.0 KiB + three `MAX_LIST` kinds at 16.0 + 16.0 + 24.0 KiB + frame list
-   128.0 KiB), every cell count printed as "n cells × headroom 2".  Two things were left
+   128.0 KiB), every cell count printed as "n cells × headroom 2".  Three things were left
    open, and each has an owner: **(a)** the word slab had *no* capacity — CLOSED 2026-10-05
    the same way 5-B.2a closed the other nine, by the model rather than the emitter:
    `sh_jpl.v` §1's `MAX_WORDS` with §7.1/§5's proofs behind it (§4.1), exported as
    `jpl_caps_table`'s tenth field, so the header now declares
    `extern jpl_text jpl_word_pool[JPL_POOL_WORD];` and 5-B.3 can link; **(b)** the per-step
    allocation bound, which §6.2's headroom 2 explicitly holds as a placeholder, to be
-   replaced by 5-B.3's allocation census and JPL.7's measured high-water mark.  The stages
-   tracked here as **5-B.2 / #39**, **5-B.2b / #40** and **5-B.2c** are DONE; the remaining
-   half lives under JPL.5 (#25) as **5-B.3**.  **(c)** is the one this section's own text
+   replaced by 5-B.3's allocation census and JPL.7's measured high-water mark.  **5-B.3a ran
+   that census on 2026-10-05 and (b) narrowed rather than closed**: the census measures
+   allocation *sites* (309 of them, demanding 7 pools), and a capacity needs cells live at
+   one step boundary, i.e. sites × loop trips, which is not in the artifact's text — so the
+   placeholder's only remaining owner is JPL.7's measurement, §6.2's decision 4 records the
+   refusal to read the site count as an extent, and the `× 2` is unchanged for all eight
+   pools.  The stages tracked here as **5-B.2 / #39**, **5-B.2b / #40** and **5-B.2c** are
+   DONE, **5-B.3a** joined them the same day, and the remaining half of the lowering pass
+   lives under JPL.5 (#25) as **5-B.3b**.  **(c)** is the one this section's own text
    did not foresee, and it was found by scoping 5-B.3 rather than by the layout run: decision
    1 declared `cmd` and `frame` *pooled* while the emitter dimensioned only their **list**
    cells, so the header's 6 `extern` pools allocated nothing for the nodes the two types turn
@@ -781,7 +881,16 @@ missing bound rather than by a design choice**:
 
 | Check | Status | Where |
 |---|---|---|
-| Models gate (coqc + coqchk ×8 + 3 extraction blocks + the two emitter rungs) | **15/15 green** (11/11 until 5-B.1 added block 2d + its negative control → 13/13; 5-B.2 added block 2e + 2e-negative → 15/15) | `verify_models.sh` |
+| Models gate (coqc + coqchk ×8 + 3 extraction blocks + the three emitter rungs) | **17/17 green** (11/11 until 5-B.1 added block 2d + its negative control → 13/13; 5-B.2 added block 2e + 2e-negative → 15/15; 5-B.3a added block 2f + 2f-negative → **17/17**; 5-B.3b-i added **checks** to 2f and 2f-negative rather than a rung, so the count is unchanged and what it means is wider) | `verify_models.sh` |
+| Every shipped binding has a lowering schema, over the vendored bytes | **measured** — 47 members classified into 26 straight-line + 7 fuel tail loops + 4 one-trip fuel idioms + 3 structural tail loops + 5 non-tail folds + 2 operator aliases, with each loop's first fuel traced to a parameter; the 5 folds are printed as `BOUNDED FOLD (non-tail)` **refusals**, not as lowering targets *(this row read "6 straight-line" until 5-B.3b-i audited it — 6 + 7 + 4 + 3 + 5 + 2 is 27, not the 47 the report marks, and the row had been quoted as if it agreed)* | `verify/c/jpl_lower.sh`, gate block 2f, `verify/c/lowering.txt` |
+| R8's instance set is counted, not assumed | **measured** — 5 polymorphic bindings, 29 call-site uses, **6 closed** instances (one C function each) and **6 open** (nothing to emit), each open one justified by a use point the interface cannot close | `verify/c/lowering.txt`, gate block 2f |
+| A lowering cannot need a function pointer (D-60411 forbids them) | **asserted zero** — 68 first-class-function sites, each in one of the four positions a lowering absorbs, `function_value_sites_unnamed = 0`.  Since 5-B.3b-i this zero is known to be a **different statement** from "every instance is nameable": `abi_refused_no_c_type = 1`, because a value can sit in a position the control-flow rules absorb and still leave its *callee* with no C type (§6.3's ABI paragraph) | gate block 2f, checks 2 and 4 |
+| The census and the shared reader agree about self-calls, and about the pools | **measured** — direct self-references agree for **47 of 47** members (`self_reference_mismatches = 0`, asserted), and every pool the census **demands** (7) is a pool 2e's header **declares** (8; the surplus `jpl_frame_pool` is printed as §6.2 decision 1's documented consequence) | gate block 2f, checks 2 and 3 |
+| The lowering census is root-sensitive too (has teeth) | **measured** — roots `run,step,mrun` ⇒ `LOWER REFUSAL: no lowering schema exists for this root set` + `mutual fixpoint: …`, exit 1: the **third** independent refusal reason over the same artifact, after 2d's subset violation and 2e's function-typed layout refusal.  Since 5-B.3b-i the same run must also leave **both** vendored artifacts byte-identical (`cksum` before/after), because the census is handed an output path and a refusal that wrote a half-rendered header would corrupt the evidence the positive rung compares against | gate block 2f-negative |
+| R8's closed instances are rendered as an ABI, and the rendering accounts for itself | **measured** — `abi_instances == instances_closed` (6), `abi_prototypes + abi_refused_no_c_type == abi_instances` (5 + 1), `abi_bodies_expressible + abi_bodies_owed == abi_prototypes` (2 + 3), `abi_blocked_outside_fold_set = 0` (a refusal §6.3 assigns to no owner is the failure; `forallb`'s, which it does assign, is printed as a finding), and the same three counts re-taken from the rendered file's own declaration / `NOT EMITTED` / `declaration only` lines | `verify/c/jpl_lower.sh` check 4, gate block 2f, `verify/c/sh_run_jpl_abi.h` |
+| The ABI header and the representation header share one value-naming rule | **measured** — a translation unit including `sh_run_jpl.h` then `sh_run_jpl_abi.h` compiles under `-std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only`, so every type name the ABI prints is one 2e typedef'd and no hidden conversion fires.  Its teeth were checked separately: a scratch `value_name` that returned `jpl_wref_typo` left **all 24 SUMMARY keys identical** and failed only at the compiler, which is why the compile is a rung and the accounting is another | `verify/c/jpl_lower.sh` check 5, gate block 2f |
+| Vendored census evidence is byte-identical to a fresh census | **measured** — `verify/c/lowering.txt` (507 lines) **and** `verify/c/sh_run_jpl_abi.h` (50 lines) regenerated and `diff -q`'d (`JPL_REGEN=1` re-pins both together, so an ABI that drifts from its measurement cannot be vendored silently) | `verify/c/jpl_lower.sh` check 6, gate block 2f |
+| The gate reads measurements, not prose | **measured** — `lowering.txt` ends with a 24-key SUMMARY, each key marked by the section that produced it, and the run **refuses** if a key is missing; `jpl_lower.sh` takes its assertions from those keys | `verify/c/jpl_lower.ml`, `verify/c/jpl_lower.sh` |
 | Emitted C99 header compiles under the strict JPL flag set | **measured** — `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only` clean over `verify/c/sh_run_jpl.h`; **36 compile-time assertions** cover every emitted type (each aggregate row carries its own `sizeof` check, the 13 one-word typedefs are covered by `jpl_check_one_word_families`) and every cap relation, so a wrong byte count is a build failure, not a stale comment.  34 until 5-B.2b added `jpl_check_words_is_the_named_sum` and `jpl_check_words_order` | `verify/c/jpl_emit.sh` check 2, gate block 2e |
 | The **ten** capacities agree across the artifact, the fold and the header | **measured** — a probe that carries no number reads `Sh_run_c.jpl_caps_table` at runtime; the emitter's syntactic fold of the same term must match it name-for-name, and each value must appear as `#define JPL_<NAME> <value>u` in the emitted header.  Nine until 2026-10-05, when `jpl_words = 16642` became the tenth | `verify/c/jpl_emit.sh` check 3, gate block 2e |
 | Every declared pool has a capacity, including the word slab and the two node pools | **measured** for the dimension (8 `extern` pools, all array-sized from `jpl_caps_table`, total 34 049.0 KiB, the slab 33 414.0 KiB of it, `jpl_cmd_pool` 128.0 KiB and `jpl_frame_pool` 320.0 KiB since 5-B.2c) · **proved** for the tree half (`cmd_fits_words`) and the environment half (`benv_words_le`) · **owed** for the expanded-copy half (the named invariant "one live frame per source node", §6) | `verify/c/layout.txt`, `sh_jpl.v` §1/§5/§7.1, gate block 2e |
@@ -1979,8 +2088,9 @@ allocation bound it points at is still unmeasured (§9.2's decision 3).  (iii) N
 emitted yet: 2d binds the *input contract*, not the emitter's behaviour — that bridge is
 D7/JPL.6/JPL.7 and is still green-by-absence, so nothing in this row may be read as
 JPL-compliance of generated code.  *(Rung names moved under it: **D7** is now 5-B.2's
-representation layer, emitted the same day, and the emitted-behaviour rung this row was
-pointing at is **D8**.)*  (iv) The front end reads the artifact but re-encodes no
+representation layer, emitted the same day; **D8** was taken on 2026-10-05 by 5-B.3a's
+lowering census, and the emitted-behaviour rung this row was pointing at is now
+**D9**.)*  (iv) The front end reads the artifact but re-encodes no
 semantics; if it ever grows a rule that changes a verdict, it has become a second model of
 the kernel and must be deleted rather than extended.
 
@@ -2041,7 +2151,9 @@ size the emitter claimed for it.  31 functions get prototypes; **5 are PENDING**
 caller counts printed, because R8 refuses to invent a monomorphic instance — the refusal is
 the deliverable, exactly as in 2d-negative.  In `AXIOTACK.md` this is derived rung **D7**
 (the rung after D6's input contract) and gate block **2e**; the rung that will check emitted
-*behaviour* — differential vectors against the kernel — is **D8**, still planned.
+*behaviour* — differential vectors against the kernel — is **D9**, still planned.  *(This
+sentence pointed at **D8** when it was written; **D8** became 5-B.3a's lowering census on
+2026-10-05, so the behaviour rung moved down one.)*
 
 **Three things this layer measured that §6 records as refutations of §6's own text.**
 (i) *"No monomorphization"* is false for the shipped closure: `length`, `app`, `rev`,
@@ -2277,16 +2389,244 @@ as a silent overwrite.  (iii) The
 a type that is pooled but never reached would still cost its pool — the census is where that
 gets checked.
 
-Next: **5-B.3a**, still under JPL.5 (#25) — the **lowering census**, deliberately a measurement
-taken before any C body is emitted: a per-binding schema table, the R8 monomorphization
-instance set by unifying each call site against the signature, an operator/allocation-class
-census by representation, and the allocation-extent-versus-pool-capacity arithmetic.  It also
-re-measures this file's inherited "6 tail loops + 9 bounded recursions", which is 5-B.1's
-estimate over the 17 recursive bindings: reading those 17 one by one gives **7 fuel-fed tail
-loops** (`glob_it`, `match_any_iter`, `setv_it`, `expand_go`, `enter_case_c`, `mrun_c`,
-`nat_digits`), **3 structural tail loops** (`teqb`, `getv`, `rev_append`), **5 linear non-tail
-folds** (`length`, `app`, `rev`, `forallb`, `branch_need`) and **2 operator aliases** — so the
-two buckets are not 6 + 9 but 7 + 3 + 5, and the census exists to turn that reading into a
-measurement.  Then **5-B.3b** emits the bodies, JPL.6 (#26) lints the result and JPL.7 (#27)
-runs it against `/bin/sh`.
+### JPL.5-B.3a / #41 — DONE (2026-10-05): the lowering census, and the day the plan's own numbers were wrong
+
+The stage was scoped as a **measurement taken before any C body exists**, and it earned
+that framing: the split this file quoted in four places retired itself, a soundness bug in
+the census tool was found only after the two sections that consume it started agreeing, and
+the census came back with a pool the header declares for no reason in the artifact.
+
+**The measured split, which replaces the inherited one.**  Over roots `mrun_c,step_c`:
+**47 members = 26 straight-line + 7 fuel tail loops + 4 fuel idioms that run one trip + 3
+structural tail loops + 5 `BOUNDED FOLD`s (non-tail) + 2 operator aliases**.  The 17 the
+front end reports as fixpoint-defined are exactly **7 + 3 + 5 + 2**, so the other 30 are the
+non-recursive rows, and reading them is not noise: four cap constants the closure mentions
+(`mAX_WORD`, `mAX_LIST`, `gLOB_FUEL`, `mAX_FUEL` — and **no** row for the other six, which
+the machine never reads), the word-level predicates (`is_digit`, `is_alpha`, `is_name`,
+`isz`, `b_dollar` … `b_0`), the step driver and its two helpers (`step_c`, `step_cmd_c`,
+`step_ret_c` — all three non-recursive, which is what L3's "no recursion in the machine"
+claim looks like from the artifact's side), and one straight-line wrapper (`expand_it`, whose
+loop is `expand_go`).
+
+Three claims retired, all of them quoted from §9.1's 5-B.1 row: *"6 fuel-bounded tail loops +
+2 print-only aliases + 9 length-bounded structural recursions"*.  There are **7** fuel loops,
+not 6, and the extra one comes out of the 9: `nat_digits` sits in both 5-A.7's and 5-B.1's
+list of nine structural recursions, and the artifact's own text makes it a fuel-fed tail
+loop.  The remaining 8 do **not** measure as 8 copy-loop rewrites: **3** are structural tail
+loops the `while` handles directly (`teqb`, `getv`, `rev_append`) and **5** are non-tail
+folds —
+`length`, `app`, `rev`, `forallb`, `branch_need` — for which no `while` exists at any budget,
+because D-60411 forbids recursion.  So the sentence "9 bounded recursions → bounded copy
+loops" described work for 3 bindings and mis-described 5; §6.3 is now the normative list, and
+the distinction only exists if a per-binding classification is done, which is why this stage
+was scoped before the emitter.  A second consequence of the same measurement: the two
+properties the estimate had merged are now separated in both directions — **4 of
+the 5 non-tail folds** (`length`, `app`, `rev`, `forallb`) are polymorphic in the interface
+while `branch_need` is not, and the fifth of the census's polymorphic set, `rev_append`, is a
+**structural tail loop**, so it needs an instance but no rewrite.  "Monomorphize the
+polymorphic helpers" is therefore not one job, and neither is "lower the recursions to
+loops": the two sets overlap in four names and each has one member the other lacks.
+
+**The four one-trip fuel idioms are a class the estimate could not have produced.**
+`nat2text`, `enter_seq`, `enter_for_c`, `step_cmd_c` each contain the
+`ExtrOcamlNatInt` nat-destruct value `(fun fO fS n -> if n=0 then fO () else fS (n-1))`, but
+their step binder never calls the enclosing binding, so the idiom evaluates **one** trip and
+lowers to `if (n == 0)` — not a loop.  `nat2text`'s step binder is *unnamed*, so the
+decremented fuel is discarded; JPL.6's Rule-6 lint must not read either shape as recursion,
+which is why `jpl_lower.ml` classifies them apart from the seven real loops instead of
+counting 11 "fuel" bindings.
+
+**A soundness bug in the census, found by the section that was supposed to agree with it.**
+The R8 instance set pushes each binding's declared interface *freshened* down into its body
+and resolves every call site against it.  The first version pushed the `.mli`'s **unfreshened**
+`'a1` into the global type store.  Because `resolve` follows the store, all five polymorphic
+bindings then shared one store entry, four "open instances" printed the *same* variable name,
+and the instance set measured nothing except whichever binding the walk inferred last — the
+`'iv38` that started this thread.  The fix instantiates one fresh set of variables per
+binding; the numbers moved from a set that looked self-consistent (and passed) to
+**29 use points → 6 closed + 6 open**, and the open ones became exactly the five self-uses of
+a binding the interface itself declares polymorphic plus `app`'s tail use inside `rev`'s
+parameter — i.e. the open set now has a *reason*.  The same fix exposed a second, quieter
+inconsistency: lambda sites rendered their instance names as strings when recorded, while
+the monomorphization section resolves them when printed, so a variable closed by a later
+unification appeared under two different names in one report.  Recorded sites now carry
+**types, not strings**, and one census has one reading of one store.
+
+**Why the gate reads SUMMARY keys and not prose.**  The first draft of `jpl_lower.sh` scraped
+the report's formatted tables instead: a pool list taken by an `awk` whose end-rule was a line
+prefix, and an instance count anchored on a label that also appears per-binding.  Both failure
+modes are *silent* — a scrape that stops early reports a smaller set than the artifact
+contains, and a mis-anchored read reports a number that is in the file but not the one asked
+for.  The shipped runner takes its inputs from the report's own **SUMMARY** keys (`key
+function_value_sites_unnamed`, `key pools_demanded`, …), one line per key, each marked by the
+section that measured it, and the census **refuses** if a key was never marked: an absent
+measurement is not a zero.  Same reason 2e reads the emitter's own PENDING field rather than
+counting `PENDING` lines — see the #39 entry's third gate-side bug.
+
+**Cross-rung finding, reported as a finding.**  The census demands **7** pools; 5-B.2's header
+declares **8**.  `jpl_frame_pool` is declared-not-demanded, and the reason is §6.2's decision
+1 (which pools `frame` on the strength of §1's cap comment, not on a self-reference the
+artifact shows — only `cmd` reaches itself).  Only the opposite direction would break a
+build, so the gate fails on demand-without-declaration and prints the surplus with its
+documented cause.  5-B.2c's defect was the same class pointing the other way — the header
+*declared* pooled types whose node pools it never dimensioned — and that is why the check is
+one-directional: an unused pool costs memory, a demanded pool that does not exist is a link
+error in a stage nobody has scoped yet.
+
+**Four checks the census makes against other rungs, none of them self-reports.**  (i) Its
+member count and recursive count (`jpl_front.sh`) — **47 / 17**, and `closure.txt` line 52
+prints the same pair for the same roots, so the two tools now bind each other's inventory
+rather than each trusting its own edge rule (5-A.7's row is the cautionary case: it recorded
+**45** for the same roots and the error survived three stages of being quoted).  (ii) Its
+pools against the **header's** (`jpl_emit.sh`): `pools_demanded ≥ 5` and every emitted
+`JPL_POOL_<KIND>` macro named by `lowering.txt`, the emitter-to-census direction — a pool
+with no demand is a finding, and (iii) is the census-to-emitter one, where demand with no
+declaration would break a build.  (iv) Its own per-binding self-call counts against the
+**shared reader's** second reading of the same bytes, for all 47 members
+(`self_reference_mismatches = 0`).
+
+**Gate and evidence state after 5-B.3a.**  `verify_models.sh` **15/15 → 17/17**: block **2f**
+builds `jpl_ast.ml` + `jpl_lower.ml` in a `mktemp -d`, runs them over the bytes block 2c
+vendored, asserts the SUMMARY is complete, asserts the three zeros the report claims
+(`function_value_sites_unnamed`, `unknown_site_classes`, `self_reference_mismatches`), runs the
+pool demand cross-check against `sh_run_jpl.h`, byte-compares the vendored evidence, and then
+**prints** the SCHEMA CENSUS, the R8 closed/open counts and "WHAT THIS CENSUS CANNOT ANSWER"
+out of that evidence — so the gate's own output restates no number.  Block **2f-negative**
+points the same tool at the oracle roots `run,step,mrun` and requires the **third independent
+refusal reason**: `LOWER REFUSAL: no lowering schema exists for this root set.` followed by
+`mutual fixpoint: … expand, expand_name, expand_brace, run, run_seq, run_for, run_case`
+(38 bindings, 17 of them recursive), distinct from 2d's subset violation and 2e's
+function-typed layout refusal.  New files: `verify/c/jpl_lower.ml`, `verify/c/jpl_lower.sh`,
+vendored `verify/c/lowering.txt` (418 lines, byte-compared, `JPL_REGEN=1` to re-pin).  *[Re-pinned
+the same day by **5-B.3b-i** at 507 lines / 24 SUMMARY keys, with `verify/c/sh_run_jpl_abi.h`
+added beside it and block 2f's checks 4–5 added to gate them; the four checks described here are
+unchanged in kind.]*  No Rocq
+file changed, so `coqc`/`coqchk`/parity/conformance keep #40's numbers (8.6 s, four `<none>`,
+66, 33/33); the emitter rungs are toolchain-only, and the two older ones re-passed on the same
+bytes with their own evidence files unchanged.
+
+**Honest limits after 5-B.3a.**  (i) **This is still not a program**: no C body is emitted,
+nothing here met JPL.6's shall-rules for function bodies, and the emitted-behaviour rung
+stays D9/#26/#27.  (ii) **Sites are not extent** — §6.2's decision 4 — so the headroom factor
+2 is unchanged for all eight pools, with one owner left: JPL.7's measured per-step
+high-water mark.  (iii) The census inherits the artifact's type aliases (`text = int list`),
+so a cons of `text` prints as a demand on `jpl_word_pool` rather than on a `text` list pool;
+that is §6's R2 (`text` is the inline leaf) read through the artifact's own alias, not a third
+reading, and the pool table's header says which way each row is counted.  (iv) **Nothing in
+the shipped code bounds the machine's stack depth** (0 bound checks consult `MAX_STACK`), and
+the frame pool exists because L3 counted frames; that debt is now measured rather than
+suspected, and 5-B.3b must either emit a saturating depth check or the model must prove the
+bound the pool size already assumes — census **obligation 3**, whose text the report prints in
+full.  (v) Five bindings are a **model-side rewrite obligation**, not an emitter job: if
+5-B.3b lowers them by inventing accumulator forms in OCaml, it has become a second model of
+the kernel.
+
+### JPL.5-B.3b-i / #41 — DONE (2026-10-05): the closed instance set rendered as a C ABI header
+
+The previous entry's "next" line asked for four things at once — the ABI, the loop bodies, the
+collection decision, the depth guard.  Taking the ABI first is not a preference: it is the only
+one of the four whose input the census already measured *completely*, and it is the rung that
+turns §6's R1–R8 from a layout the header states into a callable surface.  So 5-B.3b was split,
+and **-i is declarations and nothing else** — no body, no statement, no collection, no depth
+guard.  What landed is `verify/c/sh_run_jpl_abi.h`, generated by the same census over the same
+bytes, plus six new SUMMARY keys and two new gate checks.
+
+**The rendering, and the one instance that refuses it.**  6 closed instances → **5** prototypes
+and **1** refusal.  The prototypes are `jpl_length_1/2`, `jpl_rev_1`, `jpl_rev_append_1/2`; the
+first three carry `/* declaration only: no body until the §6.3 rewrite for this schema lands */`,
+which is §6.3's `BOUNDED FOLD` row being obeyed rather than described.  The refusal is
+`jpl_forallb_1`: at its single call site (`branch_guardb`, `sh_run_c.ml:4832`) `forallb` closes
+to `(text -> bool) -> text list -> bool`, so its parameter 1 is *function-typed*, no C type
+names it, and the only C thing that could is the function pointer D-60411 forbids.  The header
+prints a `/* NOT EMITTED — … */` comment instead of a prototype, and the gate **prints this and
+does not fail on it**, because `forallb` is already one of §6.3's five rewrite obligations: the
+assertion is not "no refusals", it is `abi_blocked_outside_fold_set = 0` — a refusal §6.3
+assigns to *no* owner is the failure, because that is the case with nobody to fix it.
+
+**One value-naming rule, now used by both headers.**  The ABI's parameter and result types come
+from `jpl_ast.ml`'s `value_name` (`L_word → jpl_wref`, otherwise `jpl_ ^ tn t`), and `jpl_emit.ml`
+was changed to call the same function where it previously hard-coded the string `"jpl_wref"`.
+That is the whole of the shared-rule claim, and it needed the shared *reader* rather than a
+shared convention: `jpl_ast.ml` also gained `has_fun`, the non-failing analogue of `has_var`,
+because `tn` refuses a function type — which is right when choosing a typedef and wrong inside a
+diagnostic that exists to explain that refusal.
+
+**Two rungs, and the one whose teeth the other cannot substitute for.**  Check 4 makes the ABI
+account for itself: `abi_instances == instances_closed`, `abi_prototypes + abi_refused_no_c_type
+== abi_instances`, `abi_bodies_expressible + abi_bodies_owed == abi_prototypes`, then the same
+three numbers counted *in the rendered file* (declaration lines, `NOT EMITTED` comments,
+`declaration only` comments).  Check 5 compiles the pair — a translation unit that includes
+`sh_run_jpl.h` then `sh_run_jpl_abi.h` — under exactly 2e's flags.  These are not redundant, and
+the difference was measured rather than argued: a scratch build in which `value_name` returned
+`jpl_wref_typo` for `L_word` left **all six ABI keys and every census count identical** and
+failed only at the compiler (`unknown type name 'jpl_wref_typo'`).  A gate that only counted
+would accept two headers that state two rules.
+
+**The printer bug the ABI exposed, caught by reading its own output.**  `forallb`'s instance
+printed as `text -> bool -> text list -> bool`, i.e. a three-argument *first-order* function —
+precisely the distinction the refusal below it makes.  `pr_lt` flattened every arrow, and OCaml's
+own printer parenthesises an arrow whose **left** operand is another arrow.  The rule is now one
+line in the census's printer, and the report, the ABI header's comment block and the refusal text
+all read `(text -> bool) -> text list -> bool`.  Nothing failed before the fix, which is the
+point: a misleading type string in a diagnostic is a documentation defect the gate cannot see, so
+it was found by *reading*, and it is recorded because the next refusal text a reader meets will be
+written by someone who trusts the printer.
+
+**The same audit applied to the tooling's own prose.**  Adding a third consumer had left the
+ordinals lying: `jpl_ast.ml`'s header enumerates three (the front end, the layout emitter, the
+lowering census), yet `jpl_emit.ml` called itself the third, `jpl_lower.ml` the fourth, `AXIOTACK.md`
+D8 the fifth, and `verify_models.sh`'s `Covers:` entries the third and fourth — plus two comments
+(`jpl_ast.ml`'s roots parameter, `jpl_front.sh`'s build-order note) still said "both/two consumers"
+from before 5-B.3a existed.  All eight places (six ordinals plus the two "both/two consumers" notes)
+now match the reader's own enumeration.  Re-running 2d/2e/2f after the edit left `closure.txt`,
+`layout.txt`, `sh_run_jpl.h`, `lowering.txt` and `sh_run_jpl_abi.h` byte-identical, which is the
+check that makes the correction safe: a tool's comment carries no measurement, and the gate proves
+it rather than assuming it.
+
+**Gate and evidence state after 5-B.3b-i.**  `verify_models.sh` stays **17/17** — no new rung,
+block **2f** gained checks 4, 5 and the second half of 6, and its title now names both stages
+(`Lowering census + ABI rendering (JPL.5-B.3a, 5-B.3b-i)`).  2f's SKIP condition now also
+requires a C99 `cc`, because check 5 needs one; **2f-negative** gained a second assertion beyond
+its refusal text: the census is handed an *output path*, so the oracle-roots run must leave both
+vendored artifacts byte-identical (`cksum` before/after) — a refusal that wrote a half-rendered
+header would corrupt the very evidence the positive rung compares against, and the renderer's
+ordering (write only after a complete census) is now tested instead of trusted.  `lowering.txt`
+**418 → 507 lines**, its SUMMARY **18 → 24 keys**; new vendored `verify/c/sh_run_jpl_abi.h`
+(50 lines: 5 prototypes, 3 declaration-only comments, 1 refusal comment).  No Rocq file changed:
+parity **66**, `conformance.sh` **33/33**, `coqchk` four `<none>` all still #40's, and blocks
+2d/2e re-passed with `closure.txt` and `layout.txt` + `sh_run_jpl.h` **unchanged** — the ABI
+consumes the layout, it does not modify it.
+
+**Honest limits after 5-B.3b-i.**  (i) **Still not a program**: 5 prototypes and 0 bodies; the
+declared functions are uncallable until 5-B.3b-ii emits them, and JPL.6's shall-rules for
+function bodies are untouched.  (ii) **The ABI is only as wide as the closed set** — the 6 *open*
+instances appear in the report and deliberately not in the header, which is the honest statement
+of the situation: an open instance has no layout to name.  If a later root set closes them the
+header grows and the vendored bytes re-pin, which is the intended failure mode rather than a
+surprise.  (iii) **Check 5 proves resolvability, not correctness**: compiling a prototype says
+every type name exists and no hidden conversion fires under `-Wconversion`; it says nothing about
+whether a *body* would satisfy the declaration's contract, which is exactly the gap §6.3's rewrite
+obligations own.  (iv) **The refusal is deferred, and it propagates to a binding the schema table calls
+lowerable.**  `jpl_forallb_1`'s owner is §6.3's fold row, but its only shipped use is
+`branch_guardb` (`sh_run_c.ml:4832`), which the schema census classifies **straight-line** —
+and the argument that makes `forallb` un-nameable there is an *inline lambda*
+(`fun p -> length p <= mAX_WORD`), not a named function.  So check 2's `0` and check 4's refusal
+are statements about different things at the same site: the census could *position* the function
+value (a known call site, one of the four places a lowering absorbs), while the ABI still cannot
+*name* the callee instance it produces.  5-B.3b-ii therefore cannot emit `branch_guardb`'s body
+until `forallb` is specialised model-side at that predicate — the 5-A pattern, a new bounded loop
+with a proved agreement lemma — and `branch_guardb` is a §6.3 consequence the fold table does not
+yet list as its own row.  (v) `value_name`'s `L_word` case is now load-bearing across two
+headers, so the shared reader has grown a *naming* responsibility it did not have when only the
+layout used it; the compile rung is what makes that safe, and removing it would silently undo the
+one thing 5-B.3b-i proved.
+
+Next: **5-B.3b-ii**, still under JPL.5 (#25) and #41 — the bodies: the 2 `rev_append` instances
+at §6.3's structural-tail-loop schema, the fuel tail loops' `while (fuel > 0)` forms with the
+fuel arriving as a parameter, the step-boundary copying collection decision 3 describes, and the
+saturating stack-depth guard census obligation 3 names.  The 5 `BOUNDED FOLD` bindings and
+`forallb`'s function-typed parameter stay model-side rewrites: if 5-B.3b-ii invents accumulator
+forms in OCaml to fill them, it has become a second model of the kernel and must be refused here
+instead.  Then JPL.6 (#26) lints the result and JPL.7 (#27) runs it against `/bin/sh`, replacing
+headroom 2 with the measured high-water mark.
 

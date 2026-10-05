@@ -65,7 +65,7 @@
 #                        oracle cluster is provably outside the subset (its mutual expand fixpoint
 #                        fails the gate) while the shipped kernel is inside it: §9.2's decision 1
 #                        becomes a measurement.  Evidence: ../c/closure.txt, byte-compared anti-rot)
-#   - ../c/jpl_emit.ml   (JPL.5-B.2 the REPRESENTATION LAYER: the third consumer of the shared
+#   - ../c/jpl_emit.ml   (JPL.5-B.2 the REPRESENTATION LAYER: the second consumer of the shared
 #                        reader jpl_ast.ml.  It reads the same shipped closure plus the artifact's
 #                        OWN jpl_caps_table and writes the C99 type layer that closure must be
 #                        lowered into: every capacity constant-folded out of the extracted term,
@@ -83,6 +83,40 @@
 #                        ../c/jpl_emit.sh additionally diffs the ten folded caps against the
 #                        artifact EVALUATED by the OCaml runtime, and compiles the header with the
 #                        JPL C99 flag set)
+#   - ../c/jpl_lower.ml  (JPL.5-B.3a the LOWERING CENSUS, plus JPL.5-B.3b-i, the ABI rendering that
+#                        comes out of it: the third of jpl_ast.ml's three consumers, and a
+#                        MEASUREMENT rather than a translation — it decides, before any C body is
+#                        emitted, (i) one lowering schema per shipped binding, with its self-call
+#                        count, tail/non-tail split and the source of its first fuel; (ii) the R8
+#                        monomorphization instance set, by pushing each `.mli` signature FRESHENED
+#                        down into the body and resolving every call site's instance, so a closed
+#                        instance is one C function and an open one is nothing to emit yet; (iii) the
+#                        first-class-function census, which positions each lambda value in one of the
+#                        four places a lowering can absorb (fuel continuation, call-site argument,
+#                        own-site redex, binding's own value) and fails if any sits nowhere, since the
+#                        only remaining representation would be a function pointer D-60411 forbids;
+#                        (iv) allocation-by-representation and the pool demand it makes, including the
+#                        caps the code COMPARES and the caps it HANDS to a call as fuel; and (v) the
+#                        obligations the artifact's text cannot answer — extent vs site count, the
+#                        non-tail rewrites, and that nothing in the shipped code bounds stack depth;
+#                        and, as JPL.5-B.3b-i, (vi) the ABI RENDERING of what (ii) closed: each
+#                        closed instance as a C prototype, typed by the SAME value-naming rule
+#                        (jpl_ast.ml's value_name) that block 2e typedef'd into sh_run_jpl.h, so the
+#                        two headers cannot drift.  Declarations only — §6.3's body schema has not
+#                        landed — and an instance whose argument is function-typed is refused loudly
+#                        rather than given the function pointer D-60411 forbids.
+#                        Two readings of the same bytes must agree: its control-flow walk is
+#                        cross-checked against the shared reader's self-reference count, its pool
+#                        demand against the header block 2e declares (a demanded pool with no
+#                        declaration fails; a declared pool with no demand is reported as §6.2's
+#                        decision 1, which is wider than reach-itself), and its ABI against itself:
+#                        rendered == closed, prototypes + refusals == rendered, expressible + owed ==
+#                        prototypes, those three against the rendered file's own lines, and the pair
+#                        of headers compiled under 2e's flags — the rung whose teeth only that check
+#                        has, since a diverged naming rule leaves every count untouched.
+#                        Evidence: ../c/lowering.txt + ../c/sh_run_jpl_abi.h, both byte-compared
+#                        anti-rot; ../c/jpl_lower.sh asserts the three zero-counts, the pool
+#                        cross-check, the ABI accounting and the ABI compile)
 #   - sh_jpl_scan.v      (Rocq/Coq JPL.5-A.1/2/3 bounded-word + iterative-scan layer: the
 #                        bt = bword layer with saturating bt_push/bt_append; the tail loops
 #                        glob_it/glob_iter/match_any_iter, the env getv_it/setv_it, the word
@@ -104,9 +138,10 @@
 #   ./verify_models.sh
 #   ./verify_models.sh --skip-coq          # skip Coq properties and the extraction step
 #   ./verify_models.sh --skip-extract      # Coq properties only, no extraction step
-# The emitter rungs (2d front end, 2e representation layer) are not Coq checks: they
-# read the vendored artifact and run even under --skip-coq, so a subset violation or a
-# wrong byte count cannot hide behind a skipped build.
+# The emitter rungs (2d front end, 2e representation layer, 2f lowering census) are not
+# Coq checks: they read the vendored artifact and run even under --skip-coq, so a subset
+# violation, a wrong byte count or an un-lowerable binding cannot hide behind a skipped
+# build.
 # Exit 0 only if all selected checks pass.
 
 set -euo pipefail
@@ -495,6 +530,108 @@ if [[ -f "$EMIT" ]] && command -v ocamlfind >/dev/null 2>&1 \
   fi
 else
   skip "SKIP: representation-layer negative control needs ocamlfind + compiler-libs.common + a C99 cc"
+  SKIP=$((SKIP + 1))
+fi
+echo
+
+# ── 2f. Lowering census + ABI rendering (JPL.5-B.3a, 5-B.3b-i): the shape, then its types ─
+# This rung reads the same vendored artifact and the same roots as 2d and 2e, and it is
+# deliberately a MEASUREMENT taken before any C body exists: per-binding lowering schema,
+# the R8 instance set resolved at the call sites, where every lambda value sits, which
+# pools the closure demands, and which caps the code compares versus hands to a call as
+# fuel.  Three of its counts are assertions rather than information — an un-positioned
+# function value could only be emitted as a function pointer (D-60411 forbids it), an
+# untyped allocation site has no representation so no pool capacity follows from it, and a
+# disagreement between the two control-flow readings means no count here measures anything.
+# Its cross-rung check is the pool one: every pool the census demands must be a pool the
+# header of 2e declares, and the difference in the other direction is reported as §6.2's
+# decision 1 rather than failed.  5-B.3b-i then renders the closed instances as a C ABI
+# header, and two more rungs gate that rendering: its own counts must close arithmetically
+# against the census and against the file they generated (nothing lost, nothing invented,
+# and no refusal §6.3 assigns to no owner), and the pair of headers must compile together
+# under 2e's flags — which is the only rung that notices a value-naming rule that stopped
+# being shared, because the counts are identical when it diverges.  It needs no Rocq
+# toolchain, only ocamlfind + compiler-libs.common + a C99 cc, so it runs even under
+# --skip-coq.
+bold "==> Lowering census + ABI rendering (JPL.5-B.3a, 5-B.3b-i)"
+CENSUS="$ROOT/../c/jpl_lower.sh"
+if [[ ! -f "$CENSUS" ]]; then
+  red "FAIL: verify/c/jpl_lower.sh is missing"
+  FAIL=$((FAIL + 1))
+elif [[ ! -f "$ROOT/../c/sh_run_jpl.h" ]]; then
+  red "FAIL: verify/c/sh_run_jpl.h is missing — the census cross-checks its pool demand"
+  red "      against the header the representation layer (2e) emits and vendors"
+  FAIL=$((FAIL + 1))
+elif ! command -v ocamlfind >/dev/null 2>&1 || ! ocamlfind query compiler-libs.common >/dev/null 2>&1; then
+  skip "SKIP: lowering census needs ocamlfind + compiler-libs.common (not installed here)"
+  SKIP=$((SKIP + 1))
+elif [[ ! -x "${CC:-/usr/bin/clang}" ]]; then
+  skip "SKIP: the ABI rung compiles its header against the representation layer's, so it needs a C99 cc (CC=${CC:-/usr/bin/clang} not executable)"
+  SKIP=$((SKIP + 1))
+else
+  if CENSUS_OUT="$("$CENSUS" 2>&1)"; then
+    printf '%s\n' "$CENSUS_OUT" | sed 's/\x1b\[[0-9;]*m//g' \
+      | grep -E '^PASS:|^    [a-z_]+ +0$|^    abi_[a-z_]+ |demanded by this walk|byte-identical' \
+      | sed 's/^/    /' || true
+    green "PASS: every shipped binding has a lowering schema, the R8 instance set is measured and rendered, every pool it demands exists, and the ABI compiles against the layout"
+    PASS=$((PASS + 1))
+  else
+    CENSUS_STATUS=$?
+    echo "$CENSUS_OUT"
+    case $CENSUS_STATUS in
+      1) red "FAIL: the census refused the shipped closure, or one of its counts is not"
+         red "      zero, or a demanded pool has no declaration, or the ABI is not exactly"
+         red "      the closed instance set, or it does not compile against the emitted"
+         red "      header, or a vendored artifact is stale — in every case the fix is a"
+         red "      model-side rewrite or a rule in the reader, never a fallback here"
+         FAIL=$((FAIL + 1)) ;;
+      *) red "FAIL: lowering census could not run (exit $CENSUS_STATUS)"
+         FAIL=$((FAIL + 1)) ;;
+    esac
+  fi
+fi
+echo
+
+# 2f-negative: the same census, pointed at the ORACLE roots, MUST refuse — and for the
+# reason this rung is allowed to see: the oracle reaches the mutual expand/expand_name/
+# expand_brace fixpoint, which has no per-binding control-flow shape at all, so no
+# lowering schema exists for that root set.  2d refuses those roots as a subset violation
+# and 2e refuses them because its driver is a function-typed value; this rung refuses them
+# as a FIXPOINT, which is the third, independent reading of the same boundary.  The run
+# must also leave the vendored evidence alone: the census is handed an output path, so a
+# refusal that writes a half-rendered header, or a negative control pointed into the tree,
+# would corrupt the artifact the positive rung byte-compares against.
+bold "==> Lowering census, negative control (oracle roots must be refused)"
+if [[ -f "$CENSUS" ]] && [[ -f "$ROOT/../c/sh_run_jpl.h" ]] \
+   && command -v ocamlfind >/dev/null 2>&1 \
+   && ocamlfind query compiler-libs.common >/dev/null 2>&1 \
+   && [[ -x "${CC:-/usr/bin/clang}" ]]; then
+  NEG_BEFORE="$(cksum "$ROOT/../c/lowering.txt" "$ROOT/../c/sh_run_jpl_abi.h" 2>/dev/null)"
+  if NEG_C_OUT="$(JPL_ROOTS=run,step,mrun "$CENSUS" 2>&1)"; then
+    echo "$NEG_C_OUT"
+    red "FAIL: the census measured a LOWERING SCHEMA for the oracle closure — but the oracle"
+    red "      is a mutual fixpoint, which is exactly what JPL Rule 6 and 5-B.3's per-binding"
+    red "      shapes cannot express; the census has no teeth"
+    FAIL=$((FAIL + 1))
+  else
+    NEG_AFTER="$(cksum "$ROOT/../c/lowering.txt" "$ROOT/../c/sh_run_jpl_abi.h" 2>/dev/null)"
+    if [[ "$NEG_BEFORE" != "$NEG_AFTER" ]]; then
+      red "FAIL: the refused run CHANGED the vendored evidence — a census that refuses must"
+      red "      write nothing, or the positive rung's byte-compare describes the negative"
+      red "      run's output rather than the shipped closure"
+      FAIL=$((FAIL + 1))
+    elif echo "$NEG_C_OUT" | grep -q "mutual fixpoint"; then
+      echo "$NEG_C_OUT" | grep -E "LOWER REFUSAL|mutual fixpoint" | sed 's/^/    /' || true
+      green "PASS: oracle roots refused as a fixpoint, with both vendored artifacts untouched — the schema verdict is root-sensitive, for the third documented reason"
+      PASS=$((PASS + 1))
+    else
+      echo "$NEG_C_OUT"
+      red "FAIL: the oracle roots were refused, but not for the documented reason (a mutual fixpoint)"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+else
+  skip "SKIP: lowering-census negative control needs ocamlfind + compiler-libs.common + the vendored header + a C99 cc"
   SKIP=$((SKIP + 1))
 fi
 echo

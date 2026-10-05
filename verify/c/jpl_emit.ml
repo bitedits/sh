@@ -1,6 +1,7 @@
 (* jpl_emit.ml — JPL.5-B.2: the C99 REPRESENTATION LAYER, derived from the artifact.
 
- * Third consumer of the shared reader (jpl_ast.ml).  The reporter reads the shipped
+ * Second consumer of the shared reader (jpl_ast.ml), whose own header enumerates its three.
+ * The reporter reads the shipped
  * closure and says whether it is inside the emitter's subset; this tool reads the
  * SAME bindings plus the artifact's cap table and WRITES the C type layer that
  * closure must be lowered into — typedefs, capacities, pool declarations and
@@ -236,7 +237,7 @@ and word_layer () =
   let sz = w4 + w4 * (c ()).c_word in
   define "jpl_wref" w4 "word handle" "jpl_ref"
     [ "typedef jpl_ref jpl_wref;   /* a text VALUE is a word-slab index */" ];
-  Hashtbl.replace memo "text" ("jpl_wref", w4);
+  Hashtbl.replace memo "text" (value_name L_word, w4);
   define "jpl_text" sz "word (pool element)" "len + code[JPL_MAX_WORD]"
     [ "/* text = int list, bounded in LENGTH by MAX_WORD (sh_jpl.v §4's bword shape).";
       "   The codes stay uint32_t: sh_concrete.v §1 only INTENDS each to be < 256, and";
@@ -258,7 +259,7 @@ and word_layer () =
   \    source node\" — named in §1, not yet proved), 2*MAX_ENV for the environment's\n\
   \    name/value cells (§5 benv_words_le), and 2 per-step temporaries." }
     :: !pools;
-  ("jpl_wref", w4)
+  ("jpl_wref", w4)   (* = value_name L_word, which is the rule the ABI renderer shares *)
 
 (* R3 *)
 and list_layer e =
@@ -535,6 +536,8 @@ and build t =
       fail "a function-typed value reached the layout table (JPL.5-A.4 removed the phi parameter; if this reappears, the model changed)"
   | L_var v ->
       fail ("an un-instantiated type variable reached the layout: '" ^ v)
+  | L_unk m ->
+      fail ("a type the reader could not infer reached the layout: " ^ m)
 
 (* ─────────────── 6. the header's opening, pools, and its assembly ───────── *)
 

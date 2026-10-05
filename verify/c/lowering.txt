@@ -1,0 +1,507 @@
+INPUT      src/kernel/sh_run_c.ml
+           src/kernel/sh_run_c.mli
+artifact   89 bindings, 83 typed signatures, 15 type declarations
+roots      mrun_c, step_c  ->  47 bindings, 17 recursive
+
+==== LOWERING SCHEMA (one row per closure member, artifact order) ====
+  name                 schema                       self  walk  tail  nont  decrease witness, and where the loop's first fuel comes from
+  length               BOUNDED FOLD (non-tail)         1     1     0     1  l' (a cons tail, but not a tail call)
+                         -> rewrite required: D-60411 forbids recursion, and a non-tail call cannot become a while
+                         note: non-tail self-calls at lines 6
+  app                  BOUNDED FOLD (non-tail)         1     1     0     1  l1 (a cons tail, but not a tail call)
+                         -> rewrite required: D-60411 forbids recursion, and a non-tail call cannot become a while
+                         note: non-tail self-calls at lines 13
+  add                  operator alias                  0     0     0     0  -
+                         note: the body is +
+  mul                  operator alias                  0     0     0     0  -
+                         note: the body is *
+  rev                  BOUNDED FOLD (non-tail)         1     1     0     1  l' (a cons tail, but not a tail call)
+                         -> rewrite required: D-60411 forbids recursion, and a non-tail call cannot become a while
+                         note: non-tail self-calls at lines 58
+  rev_append           structural tail loop            1     1     1     0  l0
+                         -> while (handle != JPL_NIL) { cell = pool[handle]; body; handle = cell.next }
+                         note: decreases on a cons tail bound by the enclosing case
+  forallb              BOUNDED FOLD (non-tail)         1     1     0     1  l0 (a cons tail, but not a tail call)
+                         -> rewrite required: D-60411 forbids recursion, and a non-tail call cannot become a while
+                         note: non-tail self-calls at lines 71
+  teqb                 structural tail loop            1     1     1     0  r1
+                         -> while (handle != JPL_NIL) { cell = pool[handle]; body; handle = cell.next }
+                         note: decreases on a cons tail bound by the enclosing case
+  bstat                straight-line                   0     0     0     0  -
+  getv                 structural tail loop            1     1     1     0  r
+                         -> while (handle != JPL_NIL) { cell = pool[handle]; body; handle = cell.next }
+                         note: decreases on a cons tail bound by the enclosing case
+  b_dollar             straight-line                   0     0     0     0  -
+  b_lbrace             straight-line                   0     0     0     0  -
+  b_rbrace             straight-line                   0     0     0     0  -
+  b_qmark              straight-line                   0     0     0     0  -
+  b_uscore             straight-line                   0     0     0     0  -
+  b_0                  straight-line                   0     0     0     0  -
+  is_digit             straight-line                   0     0     0     0  -
+  is_alpha             straight-line                   0     0     0     0  -
+  is_name              straight-line                   0     0     0     0  -
+  nat_digits           fuel tail loop                  1     1     1     0  f' = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  nat2text             fuel idiom, one trip (no self-call)     0     0     0     0  its step binder is unnamed, so the decremented fuel is discarded: one trip  first fuel <- parameter n (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> no loop: its step never calls the binding, so the idiom runs one trip
+                         note: continuations fO/fS
+  b_star               straight-line                   0     0     0     0  -
+  mAX_WORD             straight-line                   0     0     0     0  -
+  mAX_LIST             straight-line                   0     0     0     0  -
+  gLOB_FUEL            straight-line                   0     0     0     0  -
+  mAX_FUEL             straight-line                   0     0     0     0  -
+  raw_bword            straight-line                   0     0     0     0  -
+  isz                  straight-line                   0     0     0     0  -
+  enter_seq            fuel idiom, one trip (no self-call)     0     0     0     0  g = n - 1, the idiom's own decrement  first fuel <- parameter h (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> no loop: its step never calls the binding, so the idiom runs one trip
+                         note: continuations fO/fS
+  glob_it              fuel tail loop                  5     5     5     0  g = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  glob_iter            straight-line                   0     0     0     0  -
+  match_any_iter       fuel tail loop                  1     1     1     0  g = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  branch_need          BOUNDED FOLD (non-tail)         1     1     0     1  r (a cons tail, but not a tail call)
+                         -> rewrite required: D-60411 forbids recursion, and a non-tail call cannot become a while
+                         note: non-tail self-calls at lines 4824
+  branch_guardb        straight-line                   0     0     0     0  -
+  setv_it              fuel tail loop                  1     1     1     0  f' = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  ek_value             straight-line                   0     0     0     0  -
+  expand_go            fuel tail loop                  9     9     9     0  f' = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  expand_it            straight-line                   0     0     0     0  -
+  expand_c             straight-line                   0     0     0     0  -
+  assign_c             straight-line                   0     0     0     0  -
+  bind_word_o          straight-line                   0     0     0     0  -
+  enter_for_c          fuel idiom, one trip (no self-call)     0     0     0     0  g = n - 1, the idiom's own decrement  first fuel <- parameter h (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> no loop: its step never calls the binding, so the idiom runs one trip
+                         note: continuations fO/fS
+  enter_case_c         fuel tail loop                  1     1     1     0  g = n - 1, the idiom's own decrement  first fuel <- parameter h (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+  step_cmd_c           fuel idiom, one trip (no self-call)     0     0     0     0  f' = n - 1, the idiom's own decrement  first fuel <- parameter f (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> no loop: its step never calls the binding, so the idiom runs one trip
+                         note: continuations fO/fS
+  step_ret_c           straight-line                   0     0     0     0  -
+  step_c               straight-line                   0     0     0     0  -
+  mrun_c               fuel tail loop                  1     1     1     0  b' = n - 1, the idiom's own decrement  first fuel <- parameter b (argument 1 of this binding), so the CALLER's fuel arrives here
+                         -> while (fuel > 0) { fuel -= 1; body }
+                         note: continuations fO/fS
+
+==== SCHEMA CENSUS ====
+  straight-line                      26
+  fuel tail loop                     7
+  BOUNDED FOLD (non-tail)            5
+  fuel idiom, one trip (no self-call) 4
+  structural tail loop               3
+  operator alias                     2
+
+==== MONOMORPHIZATION: THE R8 INSTANCE SET, MEASURED AT THE CALL SITES ====
+  An instance is named by a variable of THIS census, never by the artifact's `'a1`:
+  each binding's declared type is freshened before it is pushed into the body, so a
+  name that appears in two rows is a sharing the code really has (app's use inside
+  rev is rev's own parameter) and two names are two unresolved use POINTS.  Counting
+  those points is what R8 needs: a closed instance is one C function, an open one is
+  nothing to emit yet.
+
+  length : declared 'a1 list -> int
+     uses in the shipped closure 9, distinct instances 3
+     instance  'iv6 list -> nat                                STILL OPEN: no layout, so nothing to emit
+               used by length           at src/kernel/sh_run_c.ml:6
+     instance  text -> nat                                     closed: one C function for this instance
+               used by expand_c         at src/kernel/sh_run_c.ml:4959
+               used by branch_guardb    at src/kernel/sh_run_c.ml:4832
+               used by branch_guardb    at src/kernel/sh_run_c.ml:4830
+               used by branch_need      at src/kernel/sh_run_c.ml:4823
+               used by branch_need      at src/kernel/sh_run_c.ml:4823
+               used by raw_bword        at src/kernel/sh_run_c.ml:4572
+     instance  text list -> nat                                closed: one C function for this instance
+               used by enter_case_c     at src/kernel/sh_run_c.ml:5016
+               used by branch_guardb    at src/kernel/sh_run_c.ml:4831
+
+  app : declared 'a1 list -> 'a1 list -> 'a1 list
+     uses in the shipped closure 2, distinct instances 2
+     instance  'iv15 list -> 'iv15 list -> 'iv15 list          STILL OPEN: no layout, so nothing to emit
+               used by app              at src/kernel/sh_run_c.ml:13
+     instance  'iv27 list -> 'iv27 list -> 'iv27 list          STILL OPEN: no layout, so nothing to emit
+               used by rev              at src/kernel/sh_run_c.ml:58
+
+  rev : declared 'a1 list -> 'a1 list
+     uses in the shipped closure 8, distinct instances 2
+     instance  'iv27 list -> 'iv27 list                        STILL OPEN: no layout, so nothing to emit
+               used by rev              at src/kernel/sh_run_c.ml:58
+     instance  text -> text                                    closed: one C function for this instance
+               used by expand_go        at src/kernel/sh_run_c.ml:4940
+               used by expand_go        at src/kernel/sh_run_c.ml:4931
+               used by expand_go        at src/kernel/sh_run_c.ml:4912
+               used by expand_go        at src/kernel/sh_run_c.ml:4908
+               used by expand_go        at src/kernel/sh_run_c.ml:4900
+               used by expand_go        at src/kernel/sh_run_c.ml:4899
+               used by ek_value         at src/kernel/sh_run_c.ml:4889
+
+  rev_append : declared 'a1 list -> 'a1 list -> 'a1 list
+     uses in the shipped closure 8, distinct instances 3
+     instance  'iv35 list -> 'iv35 list -> 'iv35 list          STILL OPEN: no layout, so nothing to emit
+               used by rev_append       at src/kernel/sh_run_c.ml:65
+     instance  (text * text) list -> (text * text) list -> (text * text) list  closed: one C function for this instance
+               used by setv_it          at src/kernel/sh_run_c.ml:4859
+               used by setv_it          at src/kernel/sh_run_c.ml:4855
+     instance  text -> text -> text                            closed: one C function for this instance
+               used by expand_go        at src/kernel/sh_run_c.ml:4944
+               used by expand_go        at src/kernel/sh_run_c.ml:4937
+               used by expand_go        at src/kernel/sh_run_c.ml:4931
+               used by expand_go        at src/kernel/sh_run_c.ml:4922
+               used by expand_go        at src/kernel/sh_run_c.ml:4899
+
+  forallb : declared ('a1 -> bool) -> 'a1 list -> bool
+     uses in the shipped closure 2, distinct instances 2
+     instance  ('iv43 -> bool) -> 'iv43 list -> bool           STILL OPEN: no layout, so nothing to emit
+               used by forallb          at src/kernel/sh_run_c.ml:71
+     instance  (text -> bool) -> text list -> bool             closed: one C function for this instance
+               used by branch_guardb    at src/kernel/sh_run_c.ml:4832
+
+==== R8 ABI: WHAT EACH CLOSED INSTANCE BECOMES IN C, AND WHAT CANNOT BE NAMED ====
+  A closed TYPE is not yet a callable C function: D-60411 forbids function
+  pointers, so an instance whose parameter or result is a function-typed value
+  is refused here even though MONOMORPHIZATION closed it.  The schema is the
+  other half: a prototype for a binding whose schema is a BOUNDED FOLD is a
+  declaration whose body is still the model's to rewrite (§6.3).
+
+  jpl_length_1
+    binding   length (instance 1 of its closed set), schema BOUNDED FOLD (non-tail)
+    layout    text -> nat
+    places    arg1 text, result nat
+    body      OWED: §6.3 says this schema needs a model-side rewrite first
+    used by   branch_guardb    at src/kernel/sh_run_c.ml:4830
+    used by   branch_guardb    at src/kernel/sh_run_c.ml:4832
+    used by   branch_need      at src/kernel/sh_run_c.ml:4823
+    used by   expand_c         at src/kernel/sh_run_c.ml:4959
+    used by   raw_bword        at src/kernel/sh_run_c.ml:4572
+
+  jpl_length_2
+    binding   length (instance 2 of its closed set), schema BOUNDED FOLD (non-tail)
+    layout    text list -> nat
+    places    arg1 text list, result nat
+    body      OWED: §6.3 says this schema needs a model-side rewrite first
+    used by   branch_guardb    at src/kernel/sh_run_c.ml:4831
+    used by   enter_case_c     at src/kernel/sh_run_c.ml:5016
+
+  jpl_rev_1
+    binding   rev (instance 1 of its closed set), schema BOUNDED FOLD (non-tail)
+    layout    text -> text
+    places    arg1 text, result text
+    body      OWED: §6.3 says this schema needs a model-side rewrite first
+    used by   ek_value         at src/kernel/sh_run_c.ml:4889
+    used by   expand_go        at src/kernel/sh_run_c.ml:4899
+    used by   expand_go        at src/kernel/sh_run_c.ml:4900
+    used by   expand_go        at src/kernel/sh_run_c.ml:4908
+    used by   expand_go        at src/kernel/sh_run_c.ml:4912
+    used by   expand_go        at src/kernel/sh_run_c.ml:4931
+    used by   expand_go        at src/kernel/sh_run_c.ml:4940
+
+  jpl_rev_append_1
+    binding   rev_append (instance 1 of its closed set), schema structural tail loop
+    layout    (text * text) list -> (text * text) list -> (text * text) list
+    places    arg1 (text * text) list, arg2 (text * text) list, result (text * text) list
+    body      expressible under §6.3 — this schema has a C form
+    used by   setv_it          at src/kernel/sh_run_c.ml:4855
+    used by   setv_it          at src/kernel/sh_run_c.ml:4859
+
+  jpl_rev_append_2
+    binding   rev_append (instance 2 of its closed set), schema structural tail loop
+    layout    text -> text -> text
+    places    arg1 text, arg2 text, result text
+    body      expressible under §6.3 — this schema has a C form
+    used by   expand_go        at src/kernel/sh_run_c.ml:4899
+    used by   expand_go        at src/kernel/sh_run_c.ml:4922
+    used by   expand_go        at src/kernel/sh_run_c.ml:4931
+    used by   expand_go        at src/kernel/sh_run_c.ml:4937
+    used by   expand_go        at src/kernel/sh_run_c.ml:4944
+
+  jpl_forallb_1
+    binding   forallb (instance 1 of its closed set), schema BOUNDED FOLD (non-tail)
+    layout    (text -> bool) -> text list -> bool
+    places    arg1 text -> bool [no C name], arg2 text list, result bool
+    body      not reached: the prototype itself cannot be named
+    used by   branch_guardb    at src/kernel/sh_run_c.ml:4832
+    REFUSED   its argument 1 is function-typed (text -> bool), so no C type names it and D-60411 forbids the only alternative — no function pointer is emitted here
+
+==== ABI SUMMARY ====
+  closed instances rendered          6
+  prototypes emitted                 5
+  refused, no C type exists          1
+    jpl_forallb_1              its argument 1 is function-typed (text -> bool), so no C type names it and D-60411 forbids the only alternative — no function pointer is emitted here
+  bodies expressible under §6.3      2
+    jpl_rev_append_1           structural tail loop
+    jpl_rev_append_2           structural tail loop
+  declarations whose body is owed    3
+    jpl_length_1               BOUNDED FOLD (non-tail)
+    jpl_length_2               BOUNDED FOLD (non-tail)
+    jpl_rev_1                  BOUNDED FOLD (non-tail)
+  blocked outside the fold set       0
+
+ABI CONSISTENT: every closed instance is accounted for, and every refusal
+  belongs to a binding §6.3 already lists as a model-side rewrite.
+
+==== SIGNATURE CONSISTENCY (each body unified against the interface it exports) ====
+  No row here re-derives a type: the `.mli`'s type is pushed DOWN into the
+  body and every use is unified against it, so what this section can find is
+  a CONTRADICTION — and a contradiction aborts this run rather than being
+  reported, because a census that disagrees with itself is not a measurement.
+  What is listed is the residue the test leaves open.
+  bodies whose result type is still open after unification: 3
+    app                'iv15 list -> 'iv15 list -> 'iv15 list
+    rev                'iv27 list -> 'iv27 list
+    rev_append         'iv35 list -> 'iv35 list -> 'iv35 list
+  of those, bindings the interface itself declares polymorphic: app, forallb, length, rev, rev_append
+
+==== FIRST-CLASS FUNCTIONS (what is a value, and what may stay one) ====
+  app                src/kernel/sh_run_c.ml:10     the binding's own value, so it becomes its C function takes 'iv15 list, 'iv15 list
+  assign_c           src/kernel/sh_run_c.ml:4963   the binding's own value, so it becomes its C function takes text, text, stack, cstate
+  bind_word_o        src/kernel/sh_run_c.ml:4971   the binding's own value, so it becomes its C function takes nat, text, text, cstate
+  branch_guardb      src/kernel/sh_run_c.ml:4828   the binding's own value, so it becomes its C function takes nat, text list, text
+  branch_guardb      src/kernel/sh_run_c.ml:4832   argument at the call site of forallb takes text
+  branch_need        src/kernel/sh_run_c.ml:4819   the binding's own value, so it becomes its C function takes text list, text
+  bstat              src/kernel/sh_run_c.ml:159    the binding's own value, so it becomes its C function takes nat
+  ek_value           src/kernel/sh_run_c.ml:4888   the binding's own value, so it becomes its C function takes (text * text) list, text
+  enter_case_c       src/kernel/sh_run_c.ml:5005   the binding's own value, so it becomes its C function takes nat, text, (text list * cmd list) list, cstate, stack
+  enter_case_c       src/kernel/sh_run_c.ml:5006   applied at its own site, so lowering inlines it takes unit -> out, nat -> out, nat
+  enter_case_c       src/kernel/sh_run_c.ml:5007   fuel continuation (base)             takes unit
+  enter_case_c       src/kernel/sh_run_c.ml:5008   fuel continuation (step)             takes nat
+  enter_for_c        src/kernel/sh_run_c.ml:4982   the binding's own value, so it becomes its C function takes nat, text, text list, cmd list, cstate, stack
+  enter_for_c        src/kernel/sh_run_c.ml:4983   applied at its own site, so lowering inlines it takes unit -> out, nat -> out, nat
+  enter_for_c        src/kernel/sh_run_c.ml:4984   fuel continuation (base)             takes unit
+  enter_for_c        src/kernel/sh_run_c.ml:4985   fuel continuation (step)             takes nat
+  enter_seq          src/kernel/sh_run_c.ml:4604   the binding's own value, so it becomes its C function takes nat, cmd list, cstate, stack
+  enter_seq          src/kernel/sh_run_c.ml:4605   applied at its own site, so lowering inlines it takes unit -> out, nat -> out, nat
+  enter_seq          src/kernel/sh_run_c.ml:4606   fuel continuation (base)             takes unit
+  enter_seq          src/kernel/sh_run_c.ml:4607   fuel continuation (step)             takes nat
+  expand_c           src/kernel/sh_run_c.ml:4957   the binding's own value, so it becomes its C function takes nat, (text * text) list, nat, text
+  expand_go          src/kernel/sh_run_c.ml:4895   the binding's own value, so it becomes its C function takes nat, (text * text) list, nat, exp_k
+  expand_go          src/kernel/sh_run_c.ml:4896   applied at its own site, so lowering inlines it takes unit -> text, nat -> text, nat
+  expand_go          src/kernel/sh_run_c.ml:4897   fuel continuation (base)             takes unit
+  expand_go          src/kernel/sh_run_c.ml:4901   fuel continuation (step)             takes nat
+  expand_it          src/kernel/sh_run_c.ml:4951   the binding's own value, so it becomes its C function takes nat, (text * text) list, nat, text
+  forallb            src/kernel/sh_run_c.ml:69     the binding's own value, so it becomes its C function ('iv43 -> bool * 'iv43 list), matched as one scrutinee
+  getv               src/kernel/sh_run_c.ml:166    the binding's own value, so it becomes its C function (text * (text * text) list), matched as one scrutinee
+  glob_it            src/kernel/sh_run_c.ml:4761   the binding's own value, so it becomes its C function takes nat, text, text, opt((text * text))
+  glob_it            src/kernel/sh_run_c.ml:4762   applied at its own site, so lowering inlines it takes unit -> bool, nat -> bool, nat
+  glob_it            src/kernel/sh_run_c.ml:4763   fuel continuation (base)             takes unit
+  glob_it            src/kernel/sh_run_c.ml:4764   fuel continuation (step)             takes nat
+  glob_iter          src/kernel/sh_run_c.ml:4803   the binding's own value, so it becomes its C function takes nat, text, text
+  is_alpha           src/kernel/sh_run_c.ml:666    the binding's own value, so it becomes its C function takes nat
+  is_digit           src/kernel/sh_run_c.ml:645    the binding's own value, so it becomes its C function takes nat
+  is_name            src/kernel/sh_run_c.ml:774    the binding's own value, so it becomes its C function takes nat
+  isz                src/kernel/sh_run_c.ml:4599   the binding's own value, so it becomes its C function takes cstate
+  length             src/kernel/sh_run_c.ml:4      the binding's own value, so it becomes its C function 'iv6 list, matched as one scrutinee
+  match_any_iter     src/kernel/sh_run_c.ml:4808   the binding's own value, so it becomes its C function takes nat, text list, text
+  match_any_iter     src/kernel/sh_run_c.ml:4809   applied at its own site, so lowering inlines it takes unit -> bool, nat -> bool, nat
+  match_any_iter     src/kernel/sh_run_c.ml:4810   fuel continuation (base)             takes unit
+  match_any_iter     src/kernel/sh_run_c.ml:4811   fuel continuation (step)             takes nat
+  mrun_c             src/kernel/sh_run_c.ml:5096   the binding's own value, so it becomes its C function takes nat, cfg
+  mrun_c             src/kernel/sh_run_c.ml:5097   applied at its own site, so lowering inlines it takes unit -> dres, nat -> dres, nat
+  mrun_c             src/kernel/sh_run_c.ml:5098   fuel continuation (base)             takes unit
+  mrun_c             src/kernel/sh_run_c.ml:5099   fuel continuation (step)             takes nat
+  nat2text           src/kernel/sh_run_c.ml:800    the binding's own value, so it becomes its C function takes nat
+  nat2text           src/kernel/sh_run_c.ml:801    applied at its own site, so lowering inlines it takes unit -> text, nat -> text, nat
+  nat2text           src/kernel/sh_run_c.ml:802    fuel continuation (base)             takes unit
+  nat2text           src/kernel/sh_run_c.ml:803    fuel continuation (step)             takes nat
+  nat_digits         src/kernel/sh_run_c.ml:779    the binding's own value, so it becomes its C function takes nat, nat, text
+  nat_digits         src/kernel/sh_run_c.ml:780    applied at its own site, so lowering inlines it takes unit -> text, nat -> text, nat
+  nat_digits         src/kernel/sh_run_c.ml:781    fuel continuation (base)             takes unit
+  nat_digits         src/kernel/sh_run_c.ml:782    fuel continuation (step)             takes nat
+  raw_bword          src/kernel/sh_run_c.ml:4571   the binding's own value, so it becomes its C function takes text
+  rev                src/kernel/sh_run_c.ml:56     the binding's own value, so it becomes its C function 'iv27 list, matched as one scrutinee
+  rev_append         src/kernel/sh_run_c.ml:62     the binding's own value, so it becomes its C function takes 'iv35 list, 'iv35 list
+  setv_it            src/kernel/sh_run_c.ml:4850   the binding's own value, so it becomes its C function takes nat, text, text, (text * text) list, (text * text) list
+  setv_it            src/kernel/sh_run_c.ml:4851   applied at its own site, so lowering inlines it takes unit -> opt((text * text) list), nat -> opt((text * text) list), nat
+  setv_it            src/kernel/sh_run_c.ml:4852   fuel continuation (base)             takes unit
+  setv_it            src/kernel/sh_run_c.ml:4853   fuel continuation (step)             takes nat
+  step_c             src/kernel/sh_run_c.ml:5089   the binding's own value, so it becomes its C function takes cfg
+  step_cmd_c         src/kernel/sh_run_c.ml:5024   the binding's own value, so it becomes its C function takes nat, cmd, stack, cstate
+  step_cmd_c         src/kernel/sh_run_c.ml:5025   applied at its own site, so lowering inlines it takes unit -> out, nat -> out, nat
+  step_cmd_c         src/kernel/sh_run_c.ml:5026   fuel continuation (base)             takes unit
+  step_cmd_c         src/kernel/sh_run_c.ml:5032   fuel continuation (step)             takes nat
+  step_ret_c         src/kernel/sh_run_c.ml:5056   the binding's own value, so it becomes its C function takes stack, cstate
+  teqb               src/kernel/sh_run_c.ml:77     the binding's own value, so it becomes its C function takes text, text
+  Four positions make a function value safe: a fuel continuation is consumed by
+  the loop the idiom builds; a lambda at a known call site is inlined there; a
+  lambda applied at its own site is a redex the lowering folds away; and a
+  binding's own value becomes that binding's C function.  Anything else would
+  have to be a function pointer, which D-60411 forbids.  Sites in that remaining
+  class: 0
+
+==== ALLOCATION BY REPRESENTATION, AND THE POOL DEMAND IT MAKES ====
+  what is built, and what this walk derives from it                sites
+  no pool demanded here: nat literal  :  nat                       61
+  no pool demanded here: Onext  :  out                             25
+  no pool demanded here: record  :  cfg                            25
+  no pool demanded here: Some  :  opt(cmd)                         15
+  no pool demanded here: false  :  bool                            12
+  no pool demanded here: ()  :  unit                               11
+  no pool demanded here: None  :  opt(cmd)                         10
+  no pool demanded here: record  :  exp_k                          10
+  ::  ->  jpl_frame_list_pool                                      9
+  ::  ->  jpl_word_pool                                            8
+  no pool demanded here: Olimit  :  out                            8
+  no pool demanded here: tuple  :  (frame * stack)                 8
+  no pool demanded here: tuple  :  (nat * text)                    8
+  []  ->  jpl_word_pool                                            7
+  no pool demanded here: tuple  :  (text * text)                   7
+  no pool demanded here: EMain  :  exp_mode                        6
+  no pool demanded here: record  :  cstate                         6
+  no pool demanded here: Some  :  opt((text * text))               4
+  no pool demanded here: true  :  bool                             4
+  ::  ->  jpl_pair_text_text_list_pool                             3
+  []  ->  jpl_pair_text_text_list_pool                             3
+  no pool demanded here: tuple  :  ((text * text) * (text * text) list) 3
+  no pool demanded here: tuple  :  (nat * (cmd * cmd))             3
+  no pool demanded here: tuple  :  (nat * (text list * (stack * cstate))) 3
+  no pool demanded here: tuple  :  (nat * cmd)                     3
+  no pool demanded here: DLim  :  dres                             2
+  no pool demanded here: EBrace  :  exp_mode                       2
+  no pool demanded here: EName  :  exp_mode                        2
+  no pool demanded here: None  :  opt(cstate)                      2
+  no pool demanded here: Oeffect  :  out                           2
+  no pool demanded here: Some  :  opt((text * text) list)          2
+  ::  ->  jpl_text_list_pool                                       1
+  While  ->  jpl_cmd_pool                                          1
+  no pool demanded here: BLimit  :  bres(bword)                    1
+  no pool demanded here: BOk  :  bres(bword)                       1
+  no pool demanded here: DDone  :  dres                            1
+  no pool demanded here: DEff  :  dres                             1
+  no pool demanded here: FAnd  :  frame                            1
+  no pool demanded here: FBang  :  frame                           1
+  no pool demanded here: FForRest  :  frame                        1
+  no pool demanded here: FIf  :  frame                             1
+  no pool demanded here: FOr  :  frame                             1
+  no pool demanded here: FSeq  :  frame                            1
+  no pool demanded here: FSeqList  :  frame                        1
+  no pool demanded here: FWhile  :  frame                          1
+  no pool demanded here: FWhileBody  :  frame                      1
+  no pool demanded here: None  :  opt((text * text) list)          1
+  no pool demanded here: None  :  opt((text * text))               1
+  no pool demanded here: None  :  opt(text)                        1
+  no pool demanded here: Odone  :  out                             1
+  no pool demanded here: Some  :  opt(cstate)                      1
+  no pool demanded here: Some  :  opt(text)                        1
+  no pool demanded here: record  :  bword                          1
+  no pool demanded here: tuple  :  (cmd * cmd)                     1
+  no pool demanded here: tuple  :  (frame * frame list)            1
+  no pool demanded here: tuple  :  (nat * (text * (text list * cmd list))) 1
+  no pool demanded here: tuple  :  (nat * cmd list)                1
+  no pool demanded here: tuple  :  (text * text list)              1
+  A row that names a pool is that site's DEMAND for one.  A row that names none
+  claims only that this walk derives no cell from it: whether such a value is
+  a by-value struct or a pooled node handle is JPL.md §6.2's decision 1, which
+  is wider than the reach-itself rule this walk can read off the artifact's
+  text — `frame` is the case that shows the difference, and the header
+  cross-check in jpl_lower.sh is where the two readings are compared.
+
+  pool array                                   element                            sites in a sig  built by
+  jpl_cmd_list_pool                            jpl_cmd_list_cell                      0     yes  -
+  jpl_cmd_pool                                 jpl_cmd_node                           1     yes  step_ret_c
+  jpl_frame_list_pool                          jpl_frame_list_cell                    9     yes  enter_for_c, enter_seq, step_cmd_c, step_ret_c
+  jpl_pair_text_list_cmd_list_list_pool        jpl_pair_text_list_cmd_list_list_cell       0     yes  -
+  jpl_pair_text_text_list_pool                 jpl_pair_text_text_list_cell           6     yes  assign_c, bind_word_o, setv_it
+  jpl_text_list_pool                           jpl_text_list_cell                     1     yes  enter_for_c
+  jpl_word_pool                                jpl_text                              15     yes  ek_value, expand_go, expand_it, nat2text, nat_digits
+
+  pools the shipped closure demands: 7
+  allocation sites still carrying a type variable (the artifact leaves
+  them open, so no representation follows from them): 8
+
+==== BOUND CHECKS AGAINST THE LOCKED CAPS (the code's own enforcement) ====
+  branch_guardb      src/kernel/sh_run_c.ml:4830   <=   nat                      against mAX_WORD (JPL_MAX_WORD)
+  branch_guardb      src/kernel/sh_run_c.ml:4831   <=   nat                      against mAX_LIST (JPL_MAX_LIST)
+  branch_guardb      src/kernel/sh_run_c.ml:4832   <=   nat                      against mAX_WORD (JPL_MAX_WORD)
+  expand_c           src/kernel/sh_run_c.ml:4959   <=   nat                      against mAX_WORD (JPL_MAX_WORD)
+
+==== CAPACITIES: the artifact's own numbers, and the ways the closure consults them ====
+  A cap reaches the machine three ways: compared in a bound check, handed to a
+  call as an argument (which is how FUEL bounds a loop, and the reason a cap
+  with 0 checks is not necessarily unenforced), or not at all — and the last is
+  a finding, which is why the column is printed even when it is zero.
+  model name   data binding   exported  jpl_caps_tbl members  checks  handed
+  MAX_WIDTH    mAX_WIDTH      yes       32          0        0       0
+  MAX_WORD     mAX_WORD       yes       256         3        3       0
+  MAX_ARGV     mAX_ARGV       yes       64          0        0       0
+  MAX_ENV      mAX_ENV        yes       128         0        0       0
+  MAX_LIST     mAX_LIST       yes       1024        1        1       0
+  MAX_CMD      mAX_CMD        NO        4096        0        0       0
+  MAX_STACK    mAX_STACK      yes       8192        0        0       0
+  MAX_WORDS    mAX_WORDS      yes       16642       0        0       0
+  GLOB_FUEL    gLOB_FUEL      yes       132353      2        0       1
+  MAX_FUEL     mAX_FUEL       yes       136449      2        0       2
+
+==== CAPACITIES HANDED TO A CALL (the bound the code applies without comparing it) ====
+  assign_c           src/kernel/sh_run_c.ml:4964   the 1st argument of setv_it          is mAX_FUEL (JPL_MAX_FUEL)
+  bind_word_o        src/kernel/sh_run_c.ml:4974   the 1st argument of setv_it          is mAX_FUEL (JPL_MAX_FUEL)
+  enter_case_c       src/kernel/sh_run_c.ml:5016   the 1st argument of match_any_iter   is gLOB_FUEL (JPL_GLOB_FUEL)
+    — inside a computed expression: the bound handed to this call is a SUM, so
+      its limit is a proof (sh_jpl.v §1), not a constant the code compares
+
+==== WHAT THIS CENSUS CANNOT ANSWER ====
+  1. EXTENT, not site count.  The pool rows above count allocation SITES; a
+     pool capacity needs the maximum number of cells LIVE at one step
+     boundary, which is sites x loop trips and is not computable from the
+     artifact's text.  JPL.md §6.2's headroom factor therefore stays
+     provisional until 5-B.3b emits bodies and JPL.7 measures the high-water
+     mark against the 7 pools this census demands.
+  2. NON-TAIL RECURSION: 5 bindings recurse where a while cannot go.  Each is
+     a MODEL-side rewrite obligation, as 5-A.2, 5-A.3 and 5-A.7 were, not an
+     emitter-side invention:
+       length             non-tail self-calls at lines 6
+       app                non-tail self-calls at lines 13
+       rev                non-tail self-calls at lines 58
+       forallb            non-tail self-calls at lines 71
+       branch_need        non-tail self-calls at lines 4824
+  3. STACK DEPTH.  MAX_STACK sizes the frame pool; bound checks in the shipped
+     closure that consult MAX_STACK: 0.  Instances of the polymorphic helpers
+     at a frame or stack type: 0.
+     So NOTHING in the code the emitter lowers bounds the machine's stack
+     depth: the pool exists because sh_jpl.v §1 counted frames, and no guard
+     reads that count.  Either 5-B.3b emits a saturating depth check or the
+     model proves the bound the pool size already assumes — JPL.md §6's named
+     debt, and this measurement is what keeps it named.
+  4. UNKNOWN SITES: 0 classes the census could not type, so no representation
+     follows from them.
+
+==== SELF-REFERENCE AUDIT (this walk against the shared reader) ====
+  direct self-references agree for 47 of 47 members
+
+CENSUS COMPLETE: 47 members, 7 pools demanded, 4 bound checks against the
+  caps, 5 non-tail recursions to rewrite, 0 unknown site classes.
+
+==== SUMMARY (one key per line, for the gate to read instead of formatted prose) ====
+  Every value below was marked by the section that measured it; a missing key is
+  reported as a failure, because an absent measurement is not a zero.
+  members                      47      the shipped closure
+  recursive                    17      of those, defined by fixpoint
+  polymorphic_bindings         5       whose interface carries a type variable
+  instance_uses                29      uses of a polymorphic binding, counted at the call sites
+  instances_closed             6       distinct closed instances: one C function each
+  instances_open               6       distinct instances still carrying a variable: nothing to emit
+  function_value_sites         68      lambda values this walk positioned
+  function_value_sites_unnamed 0       in a position no rule covers, so a function pointer would be needed
+  allocation_sites             309     expression sites that build a value
+  open_allocation_sites        8       of those, still carrying a type variable
+  pools_demanded               7       pool arrays the closure needs
+  bound_checks                 4       comparisons against a locked cap
+  caps_handed_to_a_call        3       cap constants handed to a call as an argument
+  fuel_tail_loops              7       bindings whose schema is a fuel loop
+  fuel_idiom_one_trip          4       fuel idioms whose step never calls back, so they run one trip
+  non_tail_rewrites            5       bindings a while cannot express
+  unknown_site_classes         0       expression classes this census could not type
+  self_reference_mismatches    0       where two readings of the same bytes disagree
+  abi_instances                6       closed instances the ABI section rendered
+  abi_prototypes               5       of those, ones with a C type for every place
+  abi_refused_no_c_type        1       closed instances no C prototype can name (D-60411)
+  abi_bodies_expressible       2       prototypes whose binding has a C form under §6.3
+  abi_bodies_owed              3       prototypes whose body waits on a model-side rewrite
+  abi_blocked_outside_fold_set 0       a refusal §6.3 assigns to no owner; must be 0

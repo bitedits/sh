@@ -53,8 +53,9 @@ fi
 # path would drop build artifacts into verify/c — which is exactly what an earlier
 # version of this runner did.  The build therefore happens in $BUILD with relative
 # source names and cwd = $BUILD.  jpl_ast.ml compiles FIRST because jpl_front.ml
-# opens Jpl_ast: the emitter (jpl_emit.ml, 5-B.2) is built against the same reader,
-# one reader and two consumers rather than two AST walks.
+# opens Jpl_ast: the emitter (jpl_emit.ml, 5-B.2) and the lowering census (jpl_lower.ml,
+# 5-B.3a) are built against the same reader — one reader and its three consumers rather
+# than three AST walks.
 BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 
