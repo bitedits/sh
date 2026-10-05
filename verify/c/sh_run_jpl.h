@@ -81,16 +81,21 @@
 #define JPL_MAX_LIST 1024u   /* MAX_LIST: any intermediate list length */
 #define JPL_MAX_CMD 4096u   /* MAX_CMD: node pool for one lowered cmd tree */
 #define JPL_MAX_STACK 8192u   /* MAX_STACK: explicit machine stack frames */
+#define JPL_MAX_WORDS 16642u   /* MAX_WORDS: word (text) cells in the slab */
 #define JPL_GLOB_FUEL 132353u   /* GLOB_FUEL: iterations of one full-width scan */
 #define JPL_MAX_FUEL 136449u   /* MAX_FUEL: iterations the machine may run at all */
 
-/* The total order sh_jpl.v §1 proves (cap_order, cap_fuel_order) and the
-   two derived margins, re-checked in C so a cap that drifts fails the
-   build and not only the proof. */
+/* The total order sh_jpl.v §1 proves (cap_order, cap_words_order, cap_fuel_order)
+   and the two derived margins, re-checked in C so a cap that drifts fails the
+   build and not only the proof.  The last check is the one that matters for the
+   word slab: MAX_WORDS is not an independent number, it is the sum §1 names, so
+   the C macro is pinned against its own decomposition. */
 typedef char jpl_check_cap_order[((JPL_MAX_WIDTH <= JPL_MAX_WORD) && (JPL_MAX_ARGV <= JPL_MAX_ENV) && (JPL_MAX_ENV <= JPL_MAX_LIST) && (JPL_MAX_LIST <= JPL_MAX_CMD) && (JPL_MAX_CMD <= JPL_MAX_STACK)) ? 1 : -1];
 typedef char jpl_check_cap_fuel_order[((JPL_MAX_STACK <= JPL_GLOB_FUEL) && (JPL_GLOB_FUEL <= JPL_MAX_FUEL)) ? 1 : -1];
 typedef char jpl_check_cmd_is_the_fuel_margin[((JPL_MAX_CMD + JPL_GLOB_FUEL) == JPL_MAX_FUEL) ? 1 : -1];
 typedef char jpl_check_stack_is_two_cmd_pools[((2u * JPL_MAX_CMD) == JPL_MAX_STACK) ? 1 : -1];
+typedef char jpl_check_words_is_the_named_sum[((2u * JPL_MAX_STACK + 2u * JPL_MAX_ENV + 2u) == JPL_MAX_WORDS) ? 1 : -1];
+typedef char jpl_check_words_order[((JPL_MAX_STACK <= JPL_MAX_WORDS) && (JPL_MAX_WORDS <= JPL_GLOB_FUEL)) ? 1 : -1];
 typedef char jpl_check_fuel_fits_the_word[(JPL_MAX_FUEL < 4294967295u) ? 1 : -1];
 
 /* ── the fixed-width vocabulary, then the type layer in dependency order ── */
@@ -269,16 +274,19 @@ typedef char jpl_check_one_word_families[((sizeof (jpl_nat) == 4u) && (sizeof (j
    (JPL.md §6: no dynamic allocation); they are declared here so every
    consumer compiles against one capacity.  Index 0 is JPL_NIL and is
    never allocated, so a capacity counts the reserved cell too. ── */
-/* PENDING CAPACITY — jpl_word_pool is declared, and nothing sizes it:
-words are reachable from cmd nodes (Ext, For and Case patterns hold them),
-    so they are bounded only by a PRODUCT of caps, and no entry of the LOCKED
-    cap table is the capacity of a word.  The model has to add one (see the
-    report's range) before this array can be sized; inventing a dimension here
-    would be the parallel encoding this pipeline retires. */
-extern jpl_text jpl_word_pool[];
+#define JPL_POOL_WORD 33284u   /* from JPL_MAX_WORDS, 16642 cells, x headroom 2; sh_jpl.v §1's MAX_WORDS, a sum of the already-locked caps: MAX_STACK cells for
+    the words a pool-fitting tree holds (§7.1 cmd_fits_words, from cmd_words <= 2*
+    cmd_count and cmd_fits), a second MAX_STACK for the runtime-expanded copies an
+    FFor/FCase frame holds (the OWED step-machine invariant "one live frame per
+    source node" — named in §1, not yet proved), 2*MAX_ENV for the environment's
+    name/value cells (§5 benv_words_le), and 2 per-step temporaries. */
+extern jpl_text jpl_word_pool[JPL_POOL_WORD];
 
 #define JPL_POOL_PAIR_TEXT_TEXT_LIST 256u   /* from JPL_MAX_ENV, 128 cells, x headroom 2; the environment's pair list (sh_jpl.v §5 wf_benv) */
 extern jpl_pair_text_text_list_cell jpl_pair_text_text_list_pool[JPL_POOL_PAIR_TEXT_TEXT_LIST];
+
+#define JPL_POOL_CMD 8192u   /* from JPL_MAX_CMD, 4096 cells, x headroom 2; nodes of one lowered cmd tree (sh_jpl.v §1 MAX_CMD) */
+extern jpl_cmd_node jpl_cmd_pool[JPL_POOL_CMD];
 
 #define JPL_POOL_TEXT_LIST 2048u   /* from JPL_MAX_LIST, 1024 cells, x headroom 2; an intermediate list (sh_jpl.v §1 MAX_LIST) */
 extern jpl_text_list_cell jpl_text_list_pool[JPL_POOL_TEXT_LIST];
@@ -288,6 +296,9 @@ extern jpl_cmd_list_cell jpl_cmd_list_pool[JPL_POOL_CMD_LIST];
 
 #define JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST 2048u   /* from JPL_MAX_LIST, 1024 cells, x headroom 2; an intermediate list (sh_jpl.v §1 MAX_LIST) */
 extern jpl_pair_text_list_cmd_list_list_cell jpl_pair_text_list_cmd_list_list_pool[JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST];
+
+#define JPL_POOL_FRAME 16384u   /* from JPL_MAX_STACK, 8192 cells, x headroom 2; frames of the explicit machine stack (sh_jpl.v §1 MAX_STACK) */
+extern jpl_frame_node jpl_frame_pool[JPL_POOL_FRAME];
 
 #define JPL_POOL_FRAME_LIST 16384u   /* from JPL_MAX_STACK, 8192 cells, x headroom 2; the machine stack = frame list */
 extern jpl_frame_list_cell jpl_frame_list_pool[JPL_POOL_FRAME_LIST];

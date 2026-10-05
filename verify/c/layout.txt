@@ -1,6 +1,6 @@
 INPUT      src/kernel/sh_run_c.ml
            src/kernel/sh_run_c.mli
-artifact   87 bindings, 81 typed signatures, 15 type declarations
+artifact   89 bindings, 83 typed signatures, 15 type declarations
 
 ==== CAPACITIES, FOLDED OUT OF THE ARTIFACT'S jpl_caps_table ====
   jpl_width      MAX_WIDTH     JPL_MAX_WIDTH            32   bits in the fixed-width word
@@ -10,6 +10,7 @@ artifact   87 bindings, 81 typed signatures, 15 type declarations
   jpl_list       MAX_LIST      JPL_MAX_LIST           1024   any intermediate list length
   jpl_cmd        MAX_CMD       JPL_MAX_CMD            4096   node pool for one lowered cmd tree
   jpl_stack      MAX_STACK     JPL_MAX_STACK          8192   explicit machine stack frames
+  jpl_words      MAX_WORDS     JPL_MAX_WORDS         16642   word (text) cells in the slab
   jpl_glob_fuel  GLOB_FUEL     JPL_GLOB_FUEL        132353   iterations of one full-width scan
   jpl_fuel       MAX_FUEL      JPL_MAX_FUEL         136449   iterations the machine may run at all
 
@@ -69,32 +70,40 @@ artifact   87 bindings, 81 typed signatures, 15 type declarations
 
 ==== STATIC POOLS (cells x cell size, from the caps above) ====
   array                      element                     cells      bytes         size  sized from
-  jpl_word_pool              jpl_text                  PENDING       1028 1.0 KiB per word  (no cap bounds it)
+  jpl_word_pool              jpl_text                    33284   34215952  33414.0 KiB  JPL_MAX_WORDS
   jpl_pair_text_text_list_pool jpl_pair_text_text_list_cell      256       3072      3.0 KiB  JPL_MAX_ENV
+  jpl_cmd_pool               jpl_cmd_node                 8192     131072    128.0 KiB  JPL_MAX_CMD
   jpl_text_list_pool         jpl_text_list_cell           2048      16384     16.0 KiB  JPL_MAX_LIST
   jpl_cmd_list_pool          jpl_cmd_list_cell            2048      16384     16.0 KiB  JPL_MAX_LIST
   jpl_pair_text_list_cmd_list_list_pool jpl_pair_text_list_cmd_list_list_cell     2048      24576     24.0 KiB  JPL_MAX_LIST
+  jpl_frame_pool             jpl_frame_node              16384     327680    320.0 KiB  JPL_MAX_STACK
   jpl_frame_list_pool        jpl_frame_list_cell         16384     131072    128.0 KiB  JPL_MAX_STACK
 
-  bounded static total  187.0 KiB (191488 bytes), excluding the unsized pools
+  bounded static total  34049.0 KiB (34866192 bytes), and every declared pool is inside it
 
 ==== WHAT THIS LAYER COULD NOT SIZE ====
-  jpl_word_pool (element 1028 bytes) has no capacity in the cap table.
-     words are reachable from cmd nodes (Ext, For and Case patterns hold them),
-         so they are bounded only by a PRODUCT of caps, and no entry of the LOCKED
-         cap table is the capacity of a word.  The model has to add one (see the
-         report's range) before this array can be sized; inventing a dimension here
-         would be the parallel encoding this pipeline retires.
-     What the locked caps DO imply, as a range of live words:
-       lower       4096 words (one per cmd node)                = 4112.0 KiB
-       upper    4194304 words (every node owning a full list)   = 4210688.0 KiB
-     The model must fix one number in that range and prove it.  Nothing
-     in the header allocates against a guess.
+  Nothing: every pool the header declares now carries a capacity read out
+  of jpl_caps_table.  The last gap was the word slab.  sh_jpl.v §1 added
+  MAX_WORDS on 2026-10-05 as the sum 2*MAX_STACK + 2*MAX_ENV + 2, whose
+  tree half and environment half are PROVED (§7.1 cmd_fits_words from
+  cmd_words <= 2*cmd_count; §5 benv_words_le) and whose expanded-copy half
+  is the NAMED OBLIGATION "one live frame per source node" — so the header
+  allocates against a decomposition with one recorded debt, not a guess,
+  and jpl_check_words_is_the_named_sum pins the C macro to that sum.
+  Cost of the decision, measured: the slab is 33414.0 KiB, which is 33284 cells x 1028
+  bytes per cell, and it dominates every other pool.  The per-cell size is
+  MAX_WORD uint32 codes; narrowing them needs a proved `code < 256`, which
+  sh_concrete.v §1 only intends — see JPL.md §6's follow-on note.
 
 
 ==== THE THREE NON-DERIVED CHOICES ====
-  1. pooled types            cmd, frame — from sh_jpl.v §1's cap comments;
-                             every other vocabulary type is by value and needs no capacity
+  1. pooled types            cmd, frame — from sh_jpl.v §1's cap comments, each with
+                             cmd -> jpl_cmd_pool of JPL_MAX_CMD cells x headroom 2
+                             frame -> jpl_frame_pool of JPL_MAX_STACK cells x headroom 2
+                             (the two halves are cross-checked: naming a type pooled without
+                             capping it is a refusal, not a silent fall-through to a by-value
+                             layout).  Every other vocabulary type is by value and needs no
+                             capacity
   2. list pool sizing        pair(text,text) -> JPL_MAX_ENV, frame list -> JPL_MAX_STACK,
                              every other list kind -> JPL_MAX_LIST
   3. headroom factor         2, pending JPL.5-B.3's allocation-bound proof

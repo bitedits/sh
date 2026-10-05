@@ -46,231 +46,16 @@ open Parsetree
 open Asttypes
 open Longident
 
-(* ─────────────── 1. the artifact's types, in the emitter's own view ──────── *)
+(* ───────── 1-3. the type view, the constant folder, the cap table ──────────
 
-(* Just enough structure to decide a representation.  L_word is the artifact's
-   `text`: its `.mli` says `type text = int list`, and the model's bounded
-   counterpart is sh_jpl.v §4's `bword = BW { bw_bytes : text; bw_len : nat }` with
-   `bw_len <= MAX_WORD` — a length-carrying bounded array.  So a word is an ARRAY
-   WITH ITS COUNT, not a cons list: that is a reading of the model, not a
-   convenience.  L_bres is the model's saturate-to-error result (sh_jpl.v §2). *)
-type lt =
-  | L_nat
-  | L_bool
-  | L_unit
-  | L_word
-  | L_list of lt
-  | L_opt of lt
-  | L_pair of lt * lt
-  | L_bres of lt
-  | L_named of string
-  | L_fun of lt * lt
-  | L_var of string
-
-let rec of_ct (t : core_type) : lt =
-  match t.ptyp_desc with
-  | Ptyp_any -> fail "of_ct: '_' in an emitted signature"
-  | Ptyp_var v -> L_var v
-  | Ptyp_alias (a, _) -> of_ct a
-  | Ptyp_arrow (_, a, b) -> L_fun (of_ct a, of_ct b)
-  | Ptyp_poly (_, a) -> of_ct a
-  | Ptyp_open (_, a) -> of_ct a
-  | Ptyp_tuple l ->
-      (* the artifact only builds binary pairs; an n-ary tuple would need a layout
-         decision, so it is refused rather than silently right-nested *)
-      (match List.map (fun (_, x) -> of_ct x) l with
-       | [ a; b ] -> L_pair (a, b)
-       | _ -> fail "of_ct: tuple is not binary")
-  | Ptyp_constr ({ txt }, args) ->
-      let nm = li txt in
-      (match (nm, args) with
-       | "int", [] -> L_nat
-       | "bool", [] -> L_bool
-       | "unit", [] -> L_unit
-       | "text", [] -> L_word
-       | "list", [ a ] -> L_list (of_ct a)
-       | "option", [ a ] -> L_opt (of_ct a)
-       | "bres", [ a ] -> L_bres (of_ct a)
-       | "list", [] | "option", [] | "bres", [] ->
-           fail ("of_ct: " ^ nm ^ " without its type argument")
-       | _, _ when Hashtbl.mem tydecls nm -> L_named nm
-       | _ -> fail ("of_ct: type outside the artifact's vocabulary: " ^ nm))
-  | Ptyp_variant _ -> fail "of_ct: polymorphic variant"
-  | Ptyp_object _ -> fail "of_ct: object type"
-  | Ptyp_class _ -> fail "of_ct: class type"
-  | Ptyp_package _ -> fail "of_ct: first-class module"
-  | Ptyp_extension _ -> fail "of_ct: extension point"
-  | Ptyp_functor _ -> fail "of_ct: functor type"
-
-let rec has_var = function
-  | L_var _ -> true
-  | L_list a | L_opt a | L_bres a -> has_var a
-  | L_pair (a, b) -> has_var a || has_var b
-  | L_fun (a, b) -> has_var a || has_var b
-  | _ -> false
-
-(* True of whatever occupies exactly one uint32_t WITHOUT being laid out first: a
-   scalar, a word handle, a list handle, a node handle.  Used to check that a
-   positional slot can hold a pooled node's payload — the check is on the TYPE, so
-   it cannot pass silently for a by-value struct that happens to be 4 bytes today. *)
-let single_word = function
-  | L_nat | L_bool | L_unit | L_word | L_list _ | L_named _ -> true
-  | L_opt _ | L_pair _ | L_bres _ | L_fun _ | L_var _ -> false
-
-(* The canonical short name of a value-space type.  Every emitted C identifier is
-   built from it, so it has to be injective: nat, bool, unit, text, <e>_list,
-   opt_<e>, bres_<e>, pair_<a>_<b>, and the declared names. *)
-let rec tn = function
-  | L_nat -> "nat"
-  | L_bool -> "bool"
-  | L_unit -> "unit"
-  | L_word -> "text"
-  | L_list e -> tn e ^ "_list"
-  | L_opt e -> "opt_" ^ tn e
-  | L_bres e -> "bres_" ^ tn e
-  | L_pair (a, b) -> "pair_" ^ tn a ^ "_" ^ tn b
-  | L_named n -> n
-  | L_fun _ -> fail "tn: a function-typed value has no layout"
-  | L_var v -> fail ("tn: an un-instantiated type variable reached the layout: '" ^ v)
-
-let show_lt t = tn t
-
-(* A signature's arrow spine, read off the .mli's core_type. *)
-let rec arrow_spine acc (t : core_type) =
-  match t.ptyp_desc with
-  | Ptyp_arrow (_, a, b) -> arrow_spine (a :: acc) b
-  | _ -> (List.rev acc, t)
-
-let sig_of n =
-  let ds, r = arrow_spine [] (Hashtbl.find vals n) in
-  (List.map of_ct ds, of_ct r)
-
-(* Parameter names come from the artifact's own binding, so a prototype reads like
-   the code it describes.  They are documentation; the types are the contract. *)
-let param_names e =
-  match e.pexp_desc with
-  | Pexp_function (ps, _, _) ->
-      List.filter_map
-        (fun (p : function_param) ->
-          match p.pparam_desc with
-          | Pparam_val (_, _, { ppat_desc = Ppat_var { txt }; _ }) -> Some txt
-          | _ -> None)
-        ps
-  | _ -> []
-
-(* ─────────────────────── 2. the constant folder ──────────────────────────── *)
-
-(* ExtrOcamlNatInt renders every Coq nat as `int` and every literal as a chain of
-   Stdlib.Int.succ, and the model writes each capacity as a sum, product or
-   difference of those.  Folding them back to decimals is the step that turns the
-   artifact's capacity DATA into C array dimensions.  The recognised operations are
-   exactly the ones the artifact uses, and an unrecognised one is a hard failure: a
-   silently-misfolded capacity is the worst possible defect in this pipeline.
-   Operators are recognised ONLY in head position — `let rec add = (+)` must not
-   fold to a number.  `fold` is fatal (a capacity must be exact); `try_fold`
-   reports, for the arity-0 bindings that are not capacities. *)
-let folded = Hashtbl.create 24
-
-exception Unfoldable of string
-
-(* The artifact's own aliases and Stdlib's qualified forms: legal as the head of an
-   application, never as a value. *)
-let operator_names =
-  [ "+"; "*"; "-"; "add"; "mul"; "sub"; "max"; "Nat.add"; "Nat.mul"; "Nat.sub" ]
-
-let describe_const c =
-  match c with
-  | Pconst_integer (s, None) -> "int " ^ s
-  | Pconst_integer (s, Some ch) -> "int" ^ String.make 1 ch ^ " " ^ s
-  | Pconst_char _ -> "char"
-  | Pconst_string _ -> "string"
-  | Pconst_float _ -> "float"
-
-let rec fold_e (e : expression) : int =
-  match e.pexp_desc with
-  | Pexp_constant { pconst_desc = Pconst_integer (s, None); _ } -> int_of_string s
-  | Pexp_constant { pconst_desc = c; _ } ->
-      raise (Unfoldable ("non-integer literal: " ^ describe_const c))
-  | Pexp_ident { txt } ->
-      let nm = li txt in
-      if List.mem nm operator_names then raise (Unfoldable ("operator alias: " ^ nm))
-      else if Hashtbl.mem folded nm then Hashtbl.find folded nm
-      else if Hashtbl.mem binds nm then begin
-        let v = fold_e (Hashtbl.find binds nm).b_body in
-        Hashtbl.replace folded nm v;
-        v
-      end
-      else raise (Unfoldable ("not a capacity: " ^ nm))
-  | Pexp_apply (f, args) ->
-      let op = match f.pexp_desc with Pexp_ident { txt } -> li txt | _ -> "?" in
-      let a = List.map (fun (_, e) -> fold_e e) args in
-      (match (op, a) with
-       | ("Stdlib.Int.succ", [ x ]) -> x + 1
-       | (("add" | "Nat.add" | "+" | "Stdlib.Int.add"), [ x; y ]) -> x + y
-       | (("mul" | "Nat.mul" | "*" | "Stdlib.Int.mul"), [ x; y ]) -> x * y
-       | (("Nat.sub" | "sub" | "-"), [ x; y ]) ->
-           (* Nat.sub saturates at 0 — the artifact's own Nat.sub is hooked to
-              Stdlib.max 0 (x - y) — so saturate rather than wrap *)
-           (if x < y then 0 else x - y)
-       | (("Nat.max" | "max" | "Stdlib.max"), [ x; y ]) -> max x y
-       | _ ->
-           raise
-             (Unfoldable
-                ("operation inside a capacity expression: " ^ op ^ " /"
-                ^ string_of_int (List.length a))))
-  | _ -> raise (Unfoldable "not built from nat arithmetic")
-
-let fold e =
-  try fold_e e with Unfoldable m -> fail ("capacity folding failed: " ^ m)
-
-let try_fold e = try Some (fold_e e) with Unfoldable _ -> None
-
-(* ─────────────────── 3. the cap table, read out of the artifact ──────────── *)
-
-type caps =
-  { c_width : int; c_word : int; c_argv : int; c_env : int; c_list : int;
-    c_cmd : int; c_stack : int; c_glob : int; c_fuel : int }
-
-(* (artifact field name, C macro, model name, what sh_jpl.v §1 says it bounds) *)
-let cap_fields =
-  [ ("jpl_width", "JPL_MAX_WIDTH", "MAX_WIDTH", "bits in the fixed-width word");
-    ("jpl_word", "JPL_MAX_WORD", "MAX_WORD", "codes per word (text length)");
-    ("jpl_argv", "JPL_MAX_ARGV", "MAX_ARGV", "argument words per simple command");
-    ("jpl_env", "JPL_MAX_ENV", "MAX_ENV", "simultaneously live shell variables");
-    ("jpl_list", "JPL_MAX_LIST", "MAX_LIST", "any intermediate list length");
-    ("jpl_cmd", "JPL_MAX_CMD", "MAX_CMD", "node pool for one lowered cmd tree");
-    ("jpl_stack", "JPL_MAX_STACK", "MAX_STACK", "explicit machine stack frames");
-    ("jpl_glob_fuel", "JPL_GLOB_FUEL", "GLOB_FUEL", "iterations of one full-width scan");
-    ("jpl_fuel", "JPL_MAX_FUEL", "MAX_FUEL", "iterations the machine may run at all") ]
-
-let caps_of c field =
-  match field with
-  | "jpl_width" -> c.c_width | "jpl_word" -> c.c_word | "jpl_argv" -> c.c_argv
-  | "jpl_env" -> c.c_env | "jpl_list" -> c.c_list | "jpl_cmd" -> c.c_cmd
-  | "jpl_stack" -> c.c_stack | "jpl_glob_fuel" -> c.c_glob | "jpl_fuel" -> c.c_fuel
-  | _ -> fail ("caps_of: no such capacity " ^ field)
-
-let read_caps () =
-  if not (Hashtbl.mem binds "jpl_caps_table") then
-    fail "the artifact carries no jpl_caps_table: sh_jpl.v §1.1 is not extracted";
-  match (Hashtbl.find binds "jpl_caps_table").b_body.pexp_desc with
-  | Pexp_record (flds, _) ->
-      let m =
-        List.fold_left
-          (fun a (({ txt }, v) : Longident.t loc * expression) ->
-            Hashtbl.replace a (li txt) (fold v); a)
-          (Hashtbl.create 16) flds
-      in
-      let get k =
-        if Hashtbl.mem m k then Hashtbl.find m k
-        else fail ("jpl_caps_table has no field " ^ k)
-      in
-      { c_width = get "jpl_width"; c_word = get "jpl_word";
-        c_argv = get "jpl_argv"; c_env = get "jpl_env"; c_list = get "jpl_list";
-        c_cmd = get "jpl_cmd"; c_stack = get "jpl_stack";
-        c_glob = get "jpl_glob_fuel"; c_fuel = get "jpl_fuel" }
-  | _ -> fail "jpl_caps_table is not a record literal, so its capacities cannot be read"
-
+   Those live in the SHARED READER (jpl_ast.ml §8-§10), not here: the layout
+   emitter, the subset reporter and the 5-B.3 lowering census must not compute
+   three readings of one `.mli`, and `of_ct` refusing a type outside the
+   artifact's vocabulary is a decision all three need at once.  So this file
+   consumes `lt`, `of_ct`, `tn`, `show_lt`, `sig_of`, `param_names`,
+   `single_word`, `has_var`, `w4`, the folder (`fold`, `try_fold`) and the caps
+   (`caps`, `cap_fields`, `caps_of`, `read_caps`, `c ()`) from there, and applies
+   the rule set below. *)
 (* ───────────── 4. the layout rule set, and the registry that applies it ──── *)
 
 (* One rule set, applied by construction:
@@ -305,18 +90,23 @@ let read_caps () =
 
    No rule inspects a type NAME except to ask the artifact for its declaration. *)
 
-let w4 = 4
-
 (* Hand-written decision 1: which declared types are POOLED.  A type's shape cannot
    say how many of itself are live; the model's cap comments can — sh_jpl.v §1 calls
    MAX_CMD the "node-pool capacity for one lowered cmd tree" and MAX_STACK the
    "explicit machine stack frames".  A type absent from this list is laid out by
-   value, so it needs no capacity and no pool. *)
+   value, so it needs no capacity and no pool.  The two halves of this decision are
+   checked against each other: a name in pooled_types with no capacity here is a
+   hard refusal, because the alternative is that a declared-pooled type silently
+   falls through to a by-value layout. *)
 let pooled_types = [ "cmd"; "frame" ]
 
+(* The capacity lookup for decision 1: (cells, the cap macro it came from, and why
+   that cap is the right one), sized from the artifact's own cap table. *)
 let pool_cap c nm =
-  if nm = "cmd" then Some (c.c_cmd, "JPL_MAX_CMD")
-  else if nm = "frame" then Some (c.c_stack, "JPL_MAX_STACK")
+  if nm = "cmd" then
+    Some (c.c_cmd, "JPL_MAX_CMD", "nodes of one lowered cmd tree (sh_jpl.v §1 MAX_CMD)")
+  else if nm = "frame" then
+    Some (c.c_stack, "JPL_MAX_STACK", "frames of the explicit machine stack (sh_jpl.v §1 MAX_STACK)")
   else None
 
 (* Hand-written decision 2: which cap sizes which list pool, taken from the model's
@@ -338,10 +128,6 @@ let list_cap c el =
    the live-set bound and take the factor to 1, or prove 2 is needed; stating it
    here is what keeps it out of an array dimension unnoticed. *)
 let headroom = 2
-
-let caps_r : caps option ref = ref None
-
-let c () = match !caps_r with Some x -> x | None -> fail "capacity used before the cap table was read"
 
 (* Output regions, assembled into the header in this order. *)
 let tags_b = Buffer.create 2048
@@ -461,14 +247,16 @@ and word_layer () =
       "} jpl_text;";
       sizeof_check "jpl_text" sz ];
   pools :=
-    { p_elem = "jpl_text"; p_arr = "jpl_word_pool"; p_count = None;
-      p_from = "(no cap bounds it)";
+    { p_elem = "jpl_text"; p_arr = "jpl_word_pool";
+      p_count = Some (headroom * (c ()).c_words);
+      p_from = "JPL_MAX_WORDS";
       p_why =
-        "words are reachable from cmd nodes (Ext, For and Case patterns hold them),\n\
-  \    so they are bounded only by a PRODUCT of caps, and no entry of the LOCKED\n\
-  \    cap table is the capacity of a word.  The model has to add one (see the\n\
-  \    report's range) before this array can be sized; inventing a dimension here\n\
-  \    would be the parallel encoding this pipeline retires." }
+        "sh_jpl.v §1's MAX_WORDS, a sum of the already-locked caps: MAX_STACK cells for\n\
+  \    the words a pool-fitting tree holds (§7.1 cmd_fits_words, from cmd_words <= 2*\n\
+  \    cmd_count and cmd_fits), a second MAX_STACK for the runtime-expanded copies an\n\
+  \    FFor/FCase frame holds (the OWED step-machine invariant \"one live frame per\n\
+  \    source node\" — named in §1, not yet proved), 2*MAX_ENV for the environment's\n\
+  \    name/value cells (§5 benv_words_le), and 2 per-step temporaries." }
     :: !pools;
   ("jpl_wref", w4)
 
@@ -550,10 +338,12 @@ and enum_layer nm cs =
   emit tags_b "\n";
   ("jpl_" ^ nm, w4)
 
-(* R7, case 2: a pooled NODE — tag + positional single-word slots.  Every payload
-   component is checked to be one word BEFORE the cell is emitted, so a node whose
-   constructor widened is reported, not silently truncated. *)
-and node_layer nm =
+(* R7, case 2: a pooled NODE — tag + positional single-word slots, plus the pool
+   decision 1 names it into.  Every payload component is checked to be one word
+   BEFORE the cell is emitted, so a node whose constructor widened is reported, not
+   silently truncated.  The capacity arrives from pool_cap: a type can only reach
+   this rule by being declared pooled AND capped. *)
+and node_layer nm (cap, cap_macro, why) =
   let d = Hashtbl.find tydecls nm in
   let cs =
     match d.ptype_kind with
@@ -589,6 +379,10 @@ and node_layer nm =
          (String.uppercase_ascii nm) ]
      @ List.init slots (fun i -> Printf.sprintf "  jpl_nat %s_slot%d;" nm i)
      @ [ Printf.sprintf "} %s;" node; sizeof_check node sz ]);
+  pools :=
+    { p_elem = node; p_arr = "jpl_" ^ nm ^ "_pool";
+      p_count = Some (headroom * cap); p_from = cap_macro; p_why = why }
+    :: !pools;
   emit tags_b "/* tags and slot meanings for %s, from the artifact's declaration order.\n\
               \   A pooled cell has one shape, so a constructor's arguments occupy\n\
               \   consecutive slots and the tag says how many of them mean anything. */\n"
@@ -696,7 +490,15 @@ and named_layer nm =
     | Ptype_record ls -> record_layer nm ls
     | Ptype_variant cs ->
         if List.for_all (fun cd -> ctor_arity cd = 0) cs then enum_layer nm cs
-        else if pool_cap (c ()) nm <> None then node_layer nm
+        else if List.mem nm pooled_types then
+          node_layer nm
+            (match pool_cap (c ()) nm with
+             | Some s -> s
+             | None ->
+                 fail
+                   ("pooled_types names " ^ nm
+                   ^ " but pool_cap gives it no capacity: a pooled type must be sized, \
+                     never left to fall through to a by-value layout"))
         else fat_layer nm cs
     | Ptype_open -> fail ("open type cannot be laid out: " ^ nm)
     | Ptype_external _ -> fail ("external type cannot be laid out: " ^ nm)
@@ -747,13 +549,17 @@ let caps_section () =
         model_name why)
     cap_fields;
   emit tags_b "\n\
-  /* The total order sh_jpl.v §1 proves (cap_order, cap_fuel_order) and the\n\
-  \   two derived margins, re-checked in C so a cap that drifts fails the\n\
-  \   build and not only the proof. */\n\
+  /* The total order sh_jpl.v §1 proves (cap_order, cap_words_order, cap_fuel_order)\n\
+  \   and the two derived margins, re-checked in C so a cap that drifts fails the\n\
+  \   build and not only the proof.  The last check is the one that matters for the\n\
+  \   word slab: MAX_WORDS is not an independent number, it is the sum §1 names, so\n\
+  \   the C macro is pinned against its own decomposition. */\n\
   typedef char jpl_check_cap_order[((JPL_MAX_WIDTH <= JPL_MAX_WORD) && (JPL_MAX_ARGV <= JPL_MAX_ENV) && (JPL_MAX_ENV <= JPL_MAX_LIST) && (JPL_MAX_LIST <= JPL_MAX_CMD) && (JPL_MAX_CMD <= JPL_MAX_STACK)) ? 1 : -1];\n\
   typedef char jpl_check_cap_fuel_order[((JPL_MAX_STACK <= JPL_GLOB_FUEL) && (JPL_GLOB_FUEL <= JPL_MAX_FUEL)) ? 1 : -1];\n\
   typedef char jpl_check_cmd_is_the_fuel_margin[((JPL_MAX_CMD + JPL_GLOB_FUEL) == JPL_MAX_FUEL) ? 1 : -1];\n\
   typedef char jpl_check_stack_is_two_cmd_pools[((2u * JPL_MAX_CMD) == JPL_MAX_STACK) ? 1 : -1];\n\
+  typedef char jpl_check_words_is_the_named_sum[((2u * JPL_MAX_STACK + 2u * JPL_MAX_ENV + 2u) == JPL_MAX_WORDS) ? 1 : -1];\n\
+  typedef char jpl_check_words_order[((JPL_MAX_STACK <= JPL_MAX_WORDS) && (JPL_MAX_WORDS <= JPL_GLOB_FUEL)) ? 1 : -1];\n\
   typedef char jpl_check_fuel_fits_the_word[(JPL_MAX_FUEL < 4294967295u) ? 1 : -1];\n\n"
 
 let pools_section () =
@@ -956,9 +762,27 @@ let report ml mli members vocabulary nf nv np =
           Printf.printf "  %-26s %-24s %8s %10d %12s  %s\n" p.p_arr p.p_elem "PENDING"
             esz (kb esz ^ " per word") p.p_from)
     (List.rev !pools);
-  Printf.printf "\n  bounded static total  %s (%d bytes), excluding the unsized pools\n"
-    (kb !total) !total;
+  Printf.printf "\n  bounded static total  %s (%d bytes)%s\n" (kb !total) !total
+    (if !unsized = [] then ", and every declared pool is inside it"
+     else ", excluding the unsized pools");
   section "WHAT THIS LAYER COULD NOT SIZE";
+  if !unsized = [] then begin
+    Printf.printf "  Nothing: every pool the header declares now carries a capacity read out\n";
+    Printf.printf "  of jpl_caps_table.  The last gap was the word slab.  sh_jpl.v §1 added\n";
+    Printf.printf "  MAX_WORDS on 2026-10-05 as the sum 2*MAX_STACK + 2*MAX_ENV + 2, whose\n";
+    Printf.printf "  tree half and environment half are PROVED (§7.1 cmd_fits_words from\n";
+    Printf.printf "  cmd_words <= 2*cmd_count; §5 benv_words_le) and whose expanded-copy half\n";
+    Printf.printf "  is the NAMED OBLIGATION \"one live frame per source node\" — so the header\n";
+    Printf.printf "  allocates against a decomposition with one recorded debt, not a guess,\n";
+    Printf.printf "  and jpl_check_words_is_the_named_sum pins the C macro to that sum.\n";
+    Printf.printf "  Cost of the decision, measured: the slab is %s, which is %d cells x %d\n"
+      (kb (headroom * caps.c_words * size_of_name "jpl_text"))
+      (headroom * caps.c_words) (size_of_name "jpl_text");
+    Printf.printf "  bytes per cell, and it dominates every other pool.  The per-cell size is\n";
+    Printf.printf "  MAX_WORD uint32 codes; narrowing them needs a proved `code < 256`, which\n";
+    Printf.printf "  sh_concrete.v §1 only intends — see JPL.md §6's follow-on note.\n\n"
+  end
+  else
   List.iter
     (fun p ->
       let esz = size_of_name p.p_elem in
@@ -976,9 +800,20 @@ let report ml mli members vocabulary nf nv np =
       Printf.printf "     in the header allocates against a guess.\n\n")
     (List.rev !unsized);
   section "THE THREE NON-DERIVED CHOICES";
-  Printf.printf "  1. pooled types            %s — from sh_jpl.v §1's cap comments;\n"
+  Printf.printf "  1. pooled types            %s — from sh_jpl.v §1's cap comments, each with\n"
     (String.concat ", " pooled_types);
-  Printf.printf "                             every other vocabulary type is by value and needs no capacity\n";
+  List.iter
+    (fun nm ->
+      match pool_cap caps nm with
+      | Some (_, macro, _) ->
+          Printf.printf "                             %s -> jpl_%s_pool of %s cells x headroom %d\n"
+            nm nm macro headroom
+      | None -> Printf.printf "                             %s -> NO CAPACITY\n" nm)
+    pooled_types;
+  Printf.printf "                             (the two halves are cross-checked: naming a type pooled without\n\
+                \                             capping it is a refusal, not a silent fall-through to a by-value\n\
+                \                             layout).  Every other vocabulary type is by value and needs no\n\
+                \                             capacity\n";
   Printf.printf "  2. list pool sizing        pair(text,text) -> JPL_MAX_ENV, frame list -> JPL_MAX_STACK,\n";
   Printf.printf "                             every other list kind -> JPL_MAX_LIST\n";
   Printf.printf "  3. headroom factor         %d, pending JPL.5-B.3's allocation-bound proof\n"

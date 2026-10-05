@@ -1,11 +1,13 @@
-(* jpl_ast.ml — the SHARED READER for the JPL.5 tool family (front end + emitter).
+(* jpl_ast.ml — the SHARED READER for the JPL.5 tool family (front end, layout
+ * emitter, lowering census).
 
  * Extracted from jpl_front.ml at 5-B.2 so the emitter consumes exactly the same
  * reading the subset gate is built on, instead of re-implementing a second
- * resolution of the artifact's AST.  One reader, two consumers: that is the
- * single-source rule applied on the tooling side (JPL.md §Design) — two
- * independent AST walks over the same bytes is how a transpiler starts
- * disagreeing with its own gate.
+ * resolution of the artifact's AST.  One reader, three consumers (the front end
+ * jpl_front.ml, the layout emitter jpl_emit.ml, the lowering census
+ * jpl_lower.ml): that is the single-source rule applied on the tooling side
+ * (JPL.md §Design) — two independent AST walks over the same bytes is how a
+ * transpiler starts disagreeing with its own gate.
 
  * Contents: the implementation environment (bindings, arity, recursion, mutual
  * groups), the interface environment (value signatures, type declarations and
@@ -14,7 +16,11 @@
  * the self-call count that distinguishes a loop from a nat-destruct), the
  * root-parameterised transitive closure, the TYPE VOCABULARY the closure reaches
  * (§6 — the domain of the C layout table, shared so the reporter and the emitter
- * cannot compute two domains), and the roots as a CLI parameter (§7).
+ * cannot compute two domains), the roots as a CLI parameter (§7), and — moved in
+ * from jpl_emit.ml at 5-B.3 so the lowering census reasons over one type view —
+ * the value-type model `lt` with its reader `of_ct` and short names (§8), the
+ * constant folder that turns the artifact's capacity DATA into decimals (§9),
+ * and the cap table itself (§10).
 
  * It READS the artifact and re-encodes no kernel semantics.
 
@@ -292,40 +298,50 @@ let is_var e =
   | Pexp_ident { txt = Lident s; _ } -> Some s
   | _ -> None
 
-(* `(fun fO fS n -> if n = 0 then fO () else fS (n - 1)) base step fuel` *)
-let is_fuel_idiom (ps : function_param list) (body : function_body) =
+(* `(fun fO fS n -> if n = 0 then fO () else fS (n - 1)) base step fuel`
+   Returns the idiom's three binder names when the node IS the idiom, so a consumer
+   can ask which name carries the decremented fuel instead of re-matching the shape:
+   the 5-B.3 census has to prove that every recursive call of a fuel loop passes the
+   `fS` binder (the value one less) rather than some other argument that happens to
+   be named similarly.  One shape match, in the reader, for all three consumers. *)
+let fuel_idiom (ps : function_param list) (body : function_body) =
   match ps, body with
   | [ a; b; c ],
     Pfunction_body { pexp_desc = Pexp_ifthenelse (test, base, Some step); _ } ->
-      let names =
-        match pv_name a, pv_name b, pv_name c with
-        | Some x, Some y, Some z -> Some (x, y, z)
-        | _ -> None
-      in
-      (match names with
-       | Some (fO, fS, n) when fO <> fS && fS <> n && fO <> n ->
+      (match pv_name a, pv_name b, pv_name c with
+       | Some fO, Some fS, Some n when fO <> fS && fS <> n && fO <> n ->
            (* test: n = 0 *)
-           (match test.pexp_desc with
-            | Pexp_apply (f, [ (Nolabel, x); (Nolabel, y) ]) when is_ident0 "=" f ->
-                is_var x = Some n && is_nat_lit 0 y
-            | _ -> false)
-           && (* base: fO () *)
-           (match base.pexp_desc with
-            | Pexp_apply (f, [ (Nolabel, arg) ]) when is_ident0 fO f ->
-                (match arg.pexp_desc with
-                 | Pexp_construct ({ txt = Lident "()"; _ }, None) -> true
-                 | _ -> false)
-            | _ -> false)
-           && (* step: fS (n - 1) *)
-           (match step.pexp_desc with
-            | Pexp_apply (f, [ (Nolabel, inner) ]) when is_ident0 fS f ->
-                (match inner.pexp_desc with
-                 | Pexp_apply (g, [ (Nolabel, p); (Nolabel, q) ]) when is_ident0 "-" g ->
+           let ok_test =
+             match test.pexp_desc with
+             | Pexp_apply (f, [ (Nolabel, x); (Nolabel, y) ]) when is_ident0 "=" f ->
+                 is_var x = Some n && is_nat_lit 0 y
+             | _ -> false
+           in
+           (* base: fO () *)
+           let ok_base =
+             match base.pexp_desc with
+             | Pexp_apply (f, [ (Nolabel, arg) ]) when is_ident0 fO f ->
+                 (match arg.pexp_desc with
+                  | Pexp_construct ({ txt = Lident "()"; _ }, None) -> true
+                  | _ -> false)
+             | _ -> false
+           in
+           (* step: fS (n - 1) *)
+           let ok_step =
+             match step.pexp_desc with
+             | Pexp_apply (f, [ (Nolabel, inner) ]) when is_ident0 fS f ->
+                 (match inner.pexp_desc with
+                  | Pexp_apply (g, [ (Nolabel, p); (Nolabel, q) ])
+                    when is_ident0 "-" g ->
                      is_var p = Some n && is_nat_lit 1 q
-                 | _ -> false)
-            | _ -> false)
-       | _ -> false)
-  | _ -> false
+                  | _ -> false)
+             | _ -> false
+           in
+           if ok_test && ok_base && ok_step then Some (fO, fS, n) else None
+       | _ -> None)
+  | _ -> None
+
+let is_fuel_idiom ps body = match fuel_idiom ps body with Some _ -> true | None -> false
 
 let cur : measure ref = ref (mk ())
 let sh : string list ref = ref []
@@ -512,4 +528,281 @@ let default_roots = [ "mrun_c"; "step_c" ]
 (* The closure's members, in artifact order. *)
 let closure_members () =
   List.filter (fun n -> Hashtbl.mem closure n) (List.rev !bind_order)
+
+(* ─────────────── 8. the shared VALUE-TYPE view (moved out of jpl_emit.ml) ── *)
+
+(* Just enough structure to decide a representation or to type a subexpression.
+   Moved here at 5-B.3 because the lowering census has to reason about the SAME
+   type view the layout table was built from: if the emitter's `of_ct` and the
+   lowering's inference were two readings of one `.mli`, the two could disagree
+   about which value is a word and which is a cell, and a transpiler that
+   disagrees with its own type layer is wrong in a way no compiler can report.
+
+   L_word is the artifact's `text`: its `.mli` says `type text = int list`, and
+   the model's bounded counterpart is sh_jpl.v §4's `bword = BW { bw_bytes : text;
+   bw_len : nat }` with `bw_len <= MAX_WORD` — a length-carrying bounded array.
+   So a word is an ARRAY WITH ITS COUNT, not a cons list: that is a reading of
+   the model, not a convenience.  L_bres is the model's saturate-to-error result
+   (sh_jpl.v §2). *)
+type lt =
+  | L_nat
+  | L_bool
+  | L_unit
+  | L_word
+  | L_list of lt
+  | L_opt of lt
+  | L_pair of lt * lt
+  | L_bres of lt
+  | L_named of string
+  | L_fun of lt * lt
+  | L_var of string
+  (* The one constructor no layout can be built from, added at 5-B.3 for the
+     lowering census: a bottom-up inference over the artifact's bodies meets
+     values it cannot type (a free identifier the `.mli` does not describe, a
+     construct outside the vocabulary).  The census must REPORT those sites, so
+     they need a value in the shared type view rather than an exception that
+     would abort the whole reading — and `tn` refuses one, so an unknown can
+     never be mistaken for a laid-out type.  The emitter's own signatures never
+     produce it: they come from `of_ct` over the `.mli`. *)
+  | L_unk of string
+
+let w4 = 4
+
+let rec of_ct (t : core_type) : lt =
+  match t.ptyp_desc with
+  | Ptyp_any -> fail "of_ct: '_' in an emitted signature"
+  | Ptyp_var v -> L_var v
+  | Ptyp_alias (a, _) -> of_ct a
+  | Ptyp_arrow (_, a, b) -> L_fun (of_ct a, of_ct b)
+  | Ptyp_poly (_, a) -> of_ct a
+  | Ptyp_open (_, a) -> of_ct a
+  | Ptyp_tuple l ->
+      (* the artifact only builds binary pairs; an n-ary tuple would need a layout
+         decision, so it is refused rather than silently right-nested *)
+      (match List.map (fun (_, x) -> of_ct x) l with
+       | [ a; b ] -> L_pair (a, b)
+       | _ -> fail "of_ct: tuple is not binary")
+  | Ptyp_constr ({ txt }, args) ->
+      let nm = li txt in
+      (match (nm, args) with
+       | "int", [] -> L_nat
+       | "bool", [] -> L_bool
+       | "unit", [] -> L_unit
+       | "text", [] -> L_word
+       | "list", [ a ] -> L_list (of_ct a)
+       | "option", [ a ] -> L_opt (of_ct a)
+       | "bres", [ a ] -> L_bres (of_ct a)
+       | "list", [] | "option", [] | "bres", [] ->
+           fail ("of_ct: " ^ nm ^ " without its type argument")
+       | _, _ when Hashtbl.mem tydecls nm -> L_named nm
+       | _ -> fail ("of_ct: type outside the artifact's vocabulary: " ^ nm))
+  | Ptyp_variant _ -> fail "of_ct: polymorphic variant"
+  | Ptyp_object _ -> fail "of_ct: object type"
+  | Ptyp_class _ -> fail "of_ct: class type"
+  | Ptyp_package _ -> fail "of_ct: first-class module"
+  | Ptyp_extension _ -> fail "of_ct: extension point"
+  | Ptyp_functor _ -> fail "of_ct: functor type"
+
+let rec has_var = function
+  | L_var _ -> true
+  | L_list a | L_opt a | L_bres a -> has_var a
+  | L_pair (a, b) -> has_var a || has_var b
+  | L_fun (a, b) -> has_var a || has_var b
+  | _ -> false
+
+(* The one TYPE EQUATION the artifact states outright: `type text = int list`
+   (sh_run_c.mli).  R2 gives `text` the ARRAY representation, so a value the code
+   builds with `::`/`[]` at element `int` is not a cons list — it is a word under
+   construction, and a census that called it a list would size the wrong pool.
+   `norm` applies that reading, and `int_list_is_word` DERIVES it from the
+   declaration instead of assuming it: if the manifest ever stops saying
+   `int list`, R2's array and the artifact's own type disagree, and normalising on
+   anyway would be wrong in a way no compiler can report.  A function, not a
+   module-level value, because the declarations are only in the table after
+   `add_sig` has run. *)
+let int_list_is_word () =
+  if not (Hashtbl.mem tydecls "text") then false
+  else
+    match (Hashtbl.find tydecls "text").ptype_manifest with
+    | Some t -> (match of_ct t with L_list L_nat -> true | _ -> false)
+    | None -> false
+
+let norm t =
+  match t with
+  | L_list L_nat when int_list_is_word () -> L_word
+  | _ -> t
+
+(* True of whatever occupies exactly one uint32_t WITHOUT being laid out first: a
+   scalar, a word handle, a list handle, a node handle.  Used to check that a
+   positional slot can hold a pooled node's payload — the check is on the TYPE, so
+   it cannot pass silently for a by-value struct that happens to be 4 bytes today. *)
+let single_word = function
+  | L_nat | L_bool | L_unit | L_word | L_list _ | L_named _ -> true
+  | L_opt _ | L_pair _ | L_bres _ | L_fun _ | L_var _ | L_unk _ -> false
+
+(* The canonical short name of a value-space type.  Every emitted C identifier is
+   built from it, so it has to be injective: nat, bool, unit, text, <e>_list,
+   opt_<e>, bres_<e>, pair_<a>_<b>, and the declared names. *)
+let rec tn = function
+  | L_nat -> "nat"
+  | L_bool -> "bool"
+  | L_unit -> "unit"
+  | L_word -> "text"
+  | L_list e -> tn e ^ "_list"
+  | L_opt e -> "opt_" ^ tn e
+  | L_bres e -> "bres_" ^ tn e
+  | L_pair (a, b) -> "pair_" ^ tn a ^ "_" ^ tn b
+  | L_named n -> n
+  | L_fun _ -> fail "tn: a function-typed value has no layout"
+  | L_var v -> fail ("tn: an un-instantiated type variable reached the layout: '" ^ v)
+  | L_unk w -> fail ("tn: an un-inferable type reached the layout: " ^ w)
+
+let show_lt t = tn t
+
+(* A signature's arrow spine, read off the .mli's core_type. *)
+let rec arrow_spine acc (t : core_type) =
+  match t.ptyp_desc with
+  | Ptyp_arrow (_, a, b) -> arrow_spine (a :: acc) b
+  | _ -> (List.rev acc, t)
+
+let sig_of n =
+  let ds, r = arrow_spine [] (Hashtbl.find vals n) in
+  (List.map of_ct ds, of_ct r)
+
+(* Parameter names come from the artifact's own binding, so a prototype reads like
+   the code it describes.  They are documentation; the types are the contract. *)
+let param_names e =
+  match e.pexp_desc with
+  | Pexp_function (ps, _, _) ->
+      List.filter_map
+        (fun (p : function_param) ->
+          match p.pparam_desc with
+          | Pparam_val (_, _, { ppat_desc = Ppat_var { txt }; _ }) -> Some txt
+          | _ -> None)
+        ps
+  | _ -> []
+
+(* ─────────────────── 9. the constant folder (moved out of jpl_emit.ml) ───── *)
+
+(* ExtrOcamlNatInt renders every Coq nat as `int` and every literal as a chain of
+   Stdlib.Int.succ, and the model writes each capacity as a sum, product or
+   difference of those.  Folding them back to decimals is the step that turns the
+   artifact's capacity DATA into C array dimensions.  The recognised operations are
+   exactly the ones the artifact uses, and an unrecognised one is a hard failure: a
+   silently-misfolded capacity is the worst possible defect in this pipeline.
+   Operators are recognised ONLY in head position — `let rec add = (+)` must not
+   fold to a number.  `fold` is fatal (a capacity must be exact); `try_fold`
+   reports, for the arity-0 bindings that are not capacities. *)
+let folded = Hashtbl.create 24
+
+exception Unfoldable of string
+
+(* The artifact's own aliases and Stdlib's qualified forms: legal as the head of an
+   application, never as a value. *)
+let operator_names =
+  [ "+"; "*"; "-"; "add"; "mul"; "sub"; "max"; "Nat.add"; "Nat.mul"; "Nat.sub" ]
+
+let describe_const c =
+  match c with
+  | Pconst_integer (s, None) -> "int " ^ s
+  | Pconst_integer (s, Some ch) -> "int" ^ String.make 1 ch ^ " " ^ s
+  | Pconst_char _ -> "char"
+  | Pconst_string _ -> "string"
+  | Pconst_float _ -> "float"
+
+let rec fold_e (e : expression) : int =
+  match e.pexp_desc with
+  | Pexp_constant { pconst_desc = Pconst_integer (s, None); _ } -> int_of_string s
+  | Pexp_constant { pconst_desc = c; _ } ->
+      raise (Unfoldable ("non-integer literal: " ^ describe_const c))
+  | Pexp_ident { txt } ->
+      let nm = li txt in
+      if List.mem nm operator_names then raise (Unfoldable ("operator alias: " ^ nm))
+      else if Hashtbl.mem folded nm then Hashtbl.find folded nm
+      else if Hashtbl.mem binds nm then begin
+        let v = fold_e (Hashtbl.find binds nm).b_body in
+        Hashtbl.replace folded nm v;
+        v
+      end
+      else raise (Unfoldable ("not a capacity: " ^ nm))
+  | Pexp_apply (f, args) ->
+      let op = match f.pexp_desc with Pexp_ident { txt } -> li txt | _ -> "?" in
+      let a = List.map (fun (_, e) -> fold_e e) args in
+      (match (op, a) with
+       | ("Stdlib.Int.succ", [ x ]) -> x + 1
+       | (("add" | "Nat.add" | "+" | "Stdlib.Int.add"), [ x; y ]) -> x + y
+       | (("mul" | "Nat.mul" | "*" | "Stdlib.Int.mul"), [ x; y ]) -> x * y
+       | (("Nat.sub" | "sub" | "-"), [ x; y ]) ->
+           (* Nat.sub saturates at 0 — the artifact's own Nat.sub is hooked to
+              Stdlib.max 0 (x - y) — so saturate rather than wrap *)
+           (if x < y then 0 else x - y)
+       | (("Nat.max" | "max" | "Stdlib.max"), [ x; y ]) -> max x y
+       | _ ->
+           raise
+             (Unfoldable
+                ("operation inside a capacity expression: " ^ op ^ " /"
+                ^ string_of_int (List.length a))))
+  | _ -> raise (Unfoldable "not built from nat arithmetic")
+
+let fold e =
+  try fold_e e with Unfoldable m -> fail ("capacity folding failed: " ^ m)
+
+let try_fold e = try Some (fold_e e) with Unfoldable _ -> None
+
+(* ─────────── 10. the cap table as shared data (moved out of jpl_emit.ml) ─── *)
+
+type caps =
+  { c_width : int; c_word : int; c_argv : int; c_env : int; c_list : int;
+    c_cmd : int; c_stack : int; c_words : int; c_glob : int; c_fuel : int }
+
+(* (artifact field name, C macro, model name, what sh_jpl.v §1 says it bounds) *)
+let cap_fields =
+  [ ("jpl_width", "JPL_MAX_WIDTH", "MAX_WIDTH", "bits in the fixed-width word");
+    ("jpl_word", "JPL_MAX_WORD", "MAX_WORD", "codes per word (text length)");
+    ("jpl_argv", "JPL_MAX_ARGV", "MAX_ARGV", "argument words per simple command");
+    ("jpl_env", "JPL_MAX_ENV", "MAX_ENV", "simultaneously live shell variables");
+    ("jpl_list", "JPL_MAX_LIST", "MAX_LIST", "any intermediate list length");
+    ("jpl_cmd", "JPL_MAX_CMD", "MAX_CMD", "node pool for one lowered cmd tree");
+    ("jpl_stack", "JPL_MAX_STACK", "MAX_STACK", "explicit machine stack frames");
+    ("jpl_words", "JPL_MAX_WORDS", "MAX_WORDS", "word (text) cells in the slab");
+    ("jpl_glob_fuel", "JPL_GLOB_FUEL", "GLOB_FUEL", "iterations of one full-width scan");
+    ("jpl_fuel", "JPL_MAX_FUEL", "MAX_FUEL", "iterations the machine may run at all") ]
+
+let caps_of c field =
+  match field with
+  | "jpl_width" -> c.c_width | "jpl_word" -> c.c_word | "jpl_argv" -> c.c_argv
+  | "jpl_env" -> c.c_env | "jpl_list" -> c.c_list | "jpl_cmd" -> c.c_cmd
+  | "jpl_stack" -> c.c_stack | "jpl_words" -> c.c_words
+  | "jpl_glob_fuel" -> c.c_glob | "jpl_fuel" -> c.c_fuel
+  | _ -> fail ("caps_of: no such capacity " ^ field)
+
+let read_caps () =
+  if not (Hashtbl.mem binds "jpl_caps_table") then
+    fail "the artifact carries no jpl_caps_table: sh_jpl.v §1.1 is not extracted";
+  match (Hashtbl.find binds "jpl_caps_table").b_body.pexp_desc with
+  | Pexp_record (flds, _) ->
+      let m =
+        List.fold_left
+          (fun a (({ txt }, v) : Longident.t loc * expression) ->
+            Hashtbl.replace a (li txt) (fold v); a)
+          (Hashtbl.create 16) flds
+      in
+      let get k =
+        if Hashtbl.mem m k then Hashtbl.find m k
+        else fail ("jpl_caps_table has no field " ^ k)
+      in
+      { c_width = get "jpl_width"; c_word = get "jpl_word";
+        c_argv = get "jpl_argv"; c_env = get "jpl_env"; c_list = get "jpl_list";
+        c_cmd = get "jpl_cmd"; c_stack = get "jpl_stack"; c_words = get "jpl_words";
+        c_glob = get "jpl_glob_fuel"; c_fuel = get "jpl_fuel" }
+  | _ -> fail "jpl_caps_table is not a record literal, so its capacities cannot be read"
+
+(* The one place the caps are held, so the layout emitter and the lowering census
+   read the same ten numbers out of the same extracted record. *)
+let caps_r : caps option ref = ref None
+
+let c () =
+  match !caps_r with
+  | Some x -> x
+  | None -> fail "capacity used before the cap table was read"
 

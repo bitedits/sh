@@ -229,12 +229,14 @@ OCaml kernel is preserved.
 | `MAX_LIST` | 1024 | any intermediate list length (cmd-list bodies, word lists, case branches) |
 | `MAX_CMD` | 4096 | node pool capacity for one lowered program's `cmd` tree |
 | `MAX_STACK` | 8192 | explicit machine stack frames (= 2·`MAX_CMD`, one frame per live continuation of a node-pool-sized program; a cap on nesting, independent of the fuel cap) |
+| `MAX_WORDS` | 16 642 | **cells of the word (text) slab**, added 2026-10-05 because 5-B.2's emitter could size every pool except this one. Not a new choice: a sum of the caps above, `2·MAX_STACK + 2·MAX_ENV + 2`, spelled with qualified `Nat.add` so the extracted artifact carries the *expression* rather than a numeral; measured after the fact (HISTORY, 5-B.2b) that the qualified spelling extracts as a call of the artifact's own recursive `module Nat.add` — `ExtrOcamlNatInt` hooks the `+` *notation* but not that path — which is harmless here only because `jpl_caps_table` is outside the `mrun_c`/`step_c` closure, so the lowered C sees the folded numeral and never this recursion. Summand by summand: `MAX_STACK` for the words a node-pool-fitting tree holds — **proved** by §7.1's `cmd_words ≤ 2·cmd_count` plus `cmd_fits`; a second `MAX_STACK` for the runtime-expanded copies an `FFor`/`FCase` frame holds — the **recorded obligation** "one live frame per source node", charged rather than assumed, because the machine's frames can hold expanded lists the source tree never spelled out; `2·MAX_ENV` for the environment's name and value cells — **proved** by §5's `benv_words_le`; and 2 for the per-step temporaries (`$?` rendered, and the word being expanded). `cap_words_order` places it: `MAX_STACK ≤ MAX_WORDS ≤ GLOB_FUEL` |
 | `GLOB_FUEL` | 132 353 | **one glob/branch scan's own budget**, added 2026-10-04. Defined *derivationally*, not as a literal: `S (MAX_WORD + MAX_WORD) * S MAX_WORD + MAX_WORD + MAX_WORD`, i.e. `sh_jpl_scan.v` §4.3.9's `fuel_top` evaluated at two full-width words. §4.3.14's `fuel_top_le_glob_fuel` proves it covers the law for every in-budget pair of words; because the definition and the law share one expression, it cannot drift if `MAX_WORD` changes |
 | `MAX_FUEL` | 136 449 | loop-iteration bound the machine may be handed (`b_fuel` refuses above it). Was the flat 4096 that matched ush's budget; now `GLOB_FUEL + 4096` — the deepest scan's proved budget plus the machine's own 4096-step allowance, because `step` hands ONE fuel both to its countdown and to the scans it calls |
 | `case_site_fuel` | 1537 | **the branch guard's threshold**, added with 5-A.6 (`sh_jpl_run_c.v` §5). `S (MAX_LIST + MAX_WORD + MAX_WORD)`: L2's `match_any g pats w` globs pattern *i* at fuel `g-1-i`, so its worst in-caps branch needs exactly this much site fuel. **Proved least, not merely enough** — `branch_need_worst_case` exhibits a branch that ATTAINS it (`branch_need (rep MAX_LIST p) w = case_site_fuel`), so no smaller uniform site threshold decides every in-caps branch, and `guard_fuel_is_least` states that minimality for the guard itself |
 
-Ordering is proved in two pieces: `cap_order` chains `MAX_WIDTH ≤ MAX_WORD`,
-`MAX_ARGV ≤ MAX_ENV ≤ MAX_LIST ≤ MAX_CMD ≤ MAX_STACK`, and `cap_fuel_order` adds
+Ordering is proved in three pieces: `cap_order` chains `MAX_WIDTH ≤ MAX_WORD`,
+`MAX_ARGV ≤ MAX_ENV ≤ MAX_LIST ≤ MAX_CMD ≤ MAX_STACK`, `cap_words_order` adds
+`MAX_STACK ≤ MAX_WORDS ≤ GLOB_FUEL`, and `cap_fuel_order` adds
 `MAX_STACK ≤ GLOB_FUEL ≤ MAX_FUEL`. So the largest cap is `MAX_FUEL` = 136 449,
 still three orders of magnitude inside a `uint32_t` (and inside `int32_t`), which
 is what the no-wrap argument in §3/R17 rests on. Note the direction flip this
@@ -243,7 +245,8 @@ bounds *iterations*, and nothing in the tree requires one to dominate the other
 (measured: no lemma or call site depends on `MAX_FUEL ≤ MAX_STACK`).
 
 **The cap table is DATA the emitted C reads, so the artifact has to carry it
-(sub-step 5-B.2a, 2026-10-04).**  §6's layout allocates against all nine constants
+(sub-step 5-B.2a, 2026-10-04; the tenth field `jpl_words` added 2026-10-05).**
+§6's layout allocates against all ten constants
 above, but Coq's extraction carries a constant only if the *kernel code mentions it*:
 `MAX_WORD`, `MAX_ENV`, `MAX_LIST`, `GLOB_FUEL` and `MAX_FUEL` reach `sh_run_c.ml`
 because a guard compares against them, while `MAX_WIDTH`, `MAX_ARGV`, `MAX_CMD` and
@@ -405,18 +408,42 @@ table, live-set bounded by the caps) — not by `free`, and not by a per-step re
 which the sharing in a functional program would make unsound.  §9.2's decision 3 carries
 the sizing numbers and states which half of this is measured and which half is still open.
 
-**"live-set bounded by the caps" is measured to be false for the word slab, and the
-emitter says so instead of sizing it.**  A `cmd` tree is bounded by `MAX_CMD` *nodes*,
-but a `Case` node owns a pattern list of up to `MAX_LIST` words and a `For` node a word
-list of the same, so live words are bounded by a **product** of two caps (every node
-owning a full list: `MAX_CMD × MAX_LIST`), and no entry of the LOCKED table is the
-capacity of a word.  `verify/c/layout.txt` therefore prints the implied range
-(4 096 … 4 194 304 live words, 1 028 B each) and the header declares
-`extern jpl_text jpl_word_pool[];` with **no dimension** — a `PENDING` capacity, not a
-guessed one.  Closing it is a model change, not an emitter change: `sh_jpl.v` §1 has to
-fix one number in that range, prove the machine never exceeds it, and export it through
-`jpl_caps_table` the way 5-B.2a did for the other nine.  Until then JPL.5-B.3 can lower
-every control flow in the closure but cannot link, because the slab has no extent.
+**The word slab now has a capacity (2026-10-05), and the sentence above it — "live-set
+bounded by the caps" — is what changed.**  5-B.2 measured that no LOCKED constant *is*
+the number of live `text` values, and this section then argued the live words are
+bounded by a **product** (`MAX_CMD × MAX_LIST` = 4 194 304).  That argument was per-node
+and it was wrong: a tree in which every one of `MAX_CMD` nodes owned a full `MAX_LIST`
+word list has `cmd_count` far above `MAX_CMD`, so `cmd_fits` refuses it before the
+machine ever sees it.  Per-*tree*, §7.1's `cmd_words ≤ 2 · cmd_count` plus
+`cmd_fits_words` prove the tree's own words are at most `2 · MAX_CMD = MAX_STACK`, and
+§5's `benv_words_le` proves the environment adds `2 · MAX_ENV`.  `sh_jpl.v` §1 turned
+that into `MAX_WORDS = 2·MAX_STACK + 2·MAX_ENV + 2` (16 642 cells) and §1.1 exported it
+as the table's tenth field, so the emitter sizes `jpl_word_pool` from the artifact
+instead of declaring it undimensioned.
+
+What the number is *conditioned on* is the second `MAX_STACK`, and it is stated here as
+a debt rather than a fact: an `FFor`/`FCase` frame holds the **expansion** of a tree
+list, and expansion can multiply word count, so the live expanded cells equal the
+tree's own occurrences only under the step-machine invariant "at most one live frame
+per source node" — §7.2, unwritten.  If 5-B.3's measurement refutes it, `MAX_WORDS`
+rises with it (the caps table and the gate re-pin together), or the machine grows a
+pool-exhaustion check that saturates to `BLimit` instead of an invariant that makes
+overflow impossible; either way the choice belongs to the model, not to an array
+dimension invented at the emitter.
+
+**Measured cost of the decision.**  A `jpl_text` cell is 1 028 B (§4/R2's inline
+`uint32` codes), and §6.2's headroom of 2 doubles the capacity, so the slab is
+`2 × 16 642 × 1 028` = **34 215 952 B ≈ 32.6 MiB of static extent** — it dominates every
+other pool: the seven pools beside it total **635.0 KiB**, of which 187.0 KiB were the five
+5-B.2 had already dimensioned and **448.0 KiB** are the two node pools 5-B.2c added
+(`jpl_cmd_pool` 8 192 × 16 B = 128.0 KiB, `jpl_frame_pool` 16 384 × 20 B = 320.0 KiB).  Two
+consequences are
+recorded rather than smoothed over: the per-cell width is the lever (a proved
+`code < 256` would let R2 use `uint8_t` codes and cut the slab ~4×, but
+`sh_concrete.v` §1 only *intends* that bound, so narrowing here would be an unproved
+claim — follow-on, not chosen), and a static extent this large is a fact the JPL.7 host
+must face when it links, which is why it is printed in `layout.txt` rather than left to
+the reader of a header.
 
 ### 6.1 Established extraction behaviour
 
@@ -444,7 +471,7 @@ one place owns it and it is stated.
 
 | # | choice | what was picked | why the artifact does not decide it |
 |---|---|---|---|
-| 1 | which declared types are **pooled** | `cmd`, `frame` | `cmd` is forced (it reaches itself); `frame` is bounded in shape (4 fields) and could be by-value, but §1's cap comments describe a *frame pool* (`MAX_STACK` = "explicit machine stack frames"), and a by-value frame embedded in a list cell would size the stack pool by the widest constructor instead of by `MAX_STACK`.  Picking the comment over the smaller encoding is the one place where the model's *intent* outranks the layout's arithmetic |
+| 1 | which declared types are **pooled** | `cmd`, `frame` — and each now also gets its **node pool**: `jpl_cmd_pool` of `MAX_CMD` cells × headroom, `jpl_frame_pool` of `MAX_STACK` × headroom, registered by the same rule (`node_layer`) that emits the node struct | `cmd` is forced (it reaches itself); `frame` is bounded in shape (4 fields) and could be by-value, but §1's cap comments describe a *frame pool* (`MAX_STACK` = "explicit machine stack frames"), and a by-value frame embedded in a list cell would size the stack pool by the widest constructor instead of by `MAX_STACK`.  Picking the comment over the smaller encoding is the one place where the model's *intent* outranks the layout's arithmetic.  The choice has two halves — the list of pooled names and the cap that sizes each — and 5-B.2c (2026-10-05) made them check each other: a name in `pooled_types` with no `pool_cap` entry is a hard refusal, because the silent alternative was a by-value layout of a type the decision says is pooled.  Before that fix the header dimensioned only the two types' *list* cells, so `cmd`/`frame` nodes were declared and never allocated |
 | 2 | which cap sizes which **list pool** | `pair(text,text)` → `MAX_ENV`; `frame` list → `MAX_STACK`; every other list kind → `MAX_LIST` | a list's cap depends on which list it is, and OCaml types do not carry that name.  The mapping is justified per kind by §5's `wf_benv` (an env is `MAX_ENV` pairs) and §1's `MAX_STACK` comment; the rest fall to `MAX_LIST` = "any intermediate list length" |
 | 3 | the pool **headroom** factor | 2 | a pool must hold the live set *and* the garbage produced between step boundaries, and the per-step allocation bound is not yet established by proof or measurement (decision 3's open half).  So each pool is `cap × 2`, one doubling that is explicitly a placeholder until 5-B.3's allocation census replaces it with a measured number |
 
@@ -516,8 +543,10 @@ unaffected, which is why the undercount survived: the plan only ever reasoned ab
 recursive set.  `verify/c/closure.txt` is now the authoritative inventory.]* = **6** fuel-bounded tail loops (`mrun_c`, `enter_case_c`, `setv_it`, `match_any_iter`, `glob_it`, **`expand_go`**) · 2 print-only aliases (`add`, `mul`) · **9** bounded non-fuel recursions (`teqb`, `app`, `length`, `rev_append`, `forallb`, `getv`, `nat_digits`, `branch_need`, **`rev`**).  Delta: `expand`, `expand_name`, `expand_brace` **leave** the kernel's closure, `rev` **enters** it (the loop's one-pass final reversal, bounded by `MAX_WORD`).  The oracle roots did not move (`mrun` 13, `run` 15, `step` 12 — they still hold the `expand` group, which is the point of keeping them).  What is reachable from no kernel root: `be_getv`/`be_setv` (extraction roots in their own right, consumed by §5's array-API checks) and, through the former, `getv_it` — i.e. `getv_it` is *live in the artifact and dead in the machine*, which is the distinction 5-A.6's "the one proved loop still dead" blurred.  **Consequence for the plan**: the residual `mrun_c` recursion set is exactly §6.1's "lower bounded structural recursion" class plus six tail loops, and the mutual fixpoint that made JPL.5's opening decision 2 ("does `expand_it` precede the emitter?") non-trivial no longer exists — that decision is **closed by construction**, leaving only decision 1 (which root JPL.6's Rule-6 lint binds). |
 | 5-B.1 · #38 | **Emitter front end**: read the extracted artifact the way the emitter must read it — the *typed closure from the roots the C host calls*, not the whole file — and refuse to proceed if any construct in that closure is outside JPL.5's declared subset.  Deliberately NOT a transpiler: it computes the closure, classifies every expression/pattern constructor it meets, recognises `ExtrOcamlNatInt`'s nat-destruct value (`(fun fO fS n -> if n=0 then fO () else fS (n-1))`) as a *switch*, not a call, and reports the allocation census + type vocabulary that the representation decision needs.  Loud failure is the deliverable — §9.2's decision 1 (which root Rule 6 binds) is answered by a **measured asymmetry** in the same tool: roots `mrun_c,step_c` ⇒ SUBSET OK, roots `run,step,mrun` ⇒ OFF-SUBSET on the mutual `expand`/`expand_name`/`expand_brace` fixpoint that the oracle cluster still drags in.  What the census then forces: `cmd`, `frame` and `stack` are **recursive** value types (`Seq of cmd * cmd`, `For of text * text list * cmd list`, `Case of text * (text list * cmd list) list`, `stack = frame list`), so no inline fixed-capacity encoding of them exists at any budget — §6's "static pools only" therefore means a **handle + node pool**, and only `text` is free to be an inline 256-byte run *[corrected by 5-B.2's layout: the leaf is 256 **`uint32_t` codes** = a 1028-byte `jpl_text`, and even that is reached through a `jpl_wref` handle rather than copied by value — see §6's R2*] | `verify/c/jpl_front.ml` (compiler-libs `Parse` + `Ast_iterator`), `verify/c/jpl_front.sh` (builds it in a `mktemp -d`, runs it, byte-compares the evidence), `verify/c/closure.txt` (the tracked inventory) — **DONE (2026-10-04)**.  Evidence: **gate 11/11 → 13/13** — new block **2d** runs the front end over the *vendored* bytes block 2c just bound to a fresh Extraction, plus **2d-negative**, which asserts the oracle roots are *refused* (a lint that accepts everything is not a gate); the toolchain-free rung is recorded **SKIP**, and the summary line now prints the skip count so a missing `ocamlfind` can never read as a pass.  Measured after-state: artifact **81** bindings / **76** typed signatures / **14** type declarations *[superseded the same day by **5-B.2a**: exporting `jpl_caps_table` added the `jpl_caps` record type and its field accessors to the artifact, and the tracked inventory `verify/c/closure.txt` now reads **87** bindings / **81** typed signatures / **15** type declarations — the figures 5-B.2's report prints from the same bytes.  The closure numbers below are unaffected: the caps table is data, not control flow, so the roots still reach 47 bindings / 17 recursive]*; roots `mrun_c,step_c` ⇒ **47** bindings, **17** recursive = 6 fuel-bounded tail loops (`mrun_c`, `enter_case_c`, `setv_it`, `match_any_iter`, `glob_it`, `expand_go`) + 2 print-only aliases (`add`, `mul`) + 9 length-bounded structural recursions (`length`, `app`, `rev`, `rev_append`, `forallb`, `teqb`, `getv`, `nat_digits`, `branch_need`) — which **agrees name-for-name with the 17-name recursive split of 5-A.7's census but supersedes its member count** (that row recorded 45, re-measured here at 47 by two methods — AST closure and a text identifier graph — that are set-equal; see the correction appended to that row); **2** mutual `let rec` groups exist in the file and **0** are in the shipped closure.  Expression classes met: ident 7068, apply 6572, construct 163, function 68, constant 61, tuple 43, record 42, match 40, if 32, field 28, let 11; pattern classes: var 253, construct 107, tuple 54, any 24.  Allocation census (the sizing input): literal `nat` 61, tuple 43, `record(4 fields)` 35, ctor `Onext` 25, cons 24, `option Some` 23, `option None` 15, ctor `false` 12, nil 12, unit 11, ctor `Olimit` 8, `record(2 fields)` 7, ctor `EMain` 6, ctor `true` 4, then 19 single-site constructors |
 | 5-B.2a | **Cap table as data**: make the nine LOCKED constants readable by the emitter *from the artifact*, so no layout tool holds a second copy of §1's table | `sh_jpl.v` §1.1 (`jpl_caps` record, `jpl_caps_table`, `jpl_caps_are_locked`) → `jpl_caps`/`jpl_caps_table` in `sh_run_c.ml`/`.mli` — **DONE (2026-10-04)**.  *Why it was needed*: extraction carries a constant only when kernel code mentions it, so `MAX_WIDTH`, `MAX_ARGV`, `MAX_CMD` and `MAX_STACK` — proof-only in the kernel — would have vanished and the emitter would have had to hard-code them.  *Evidence*: re-extraction green, parity 66 unchanged, `conformance.sh` 33/33, and gate block 2c's artifact check; the differential in 5-B.2's block 2e is what makes this export load-bearing rather than decorative |
-| 5-B.2 · #39 | **Representation layer**: turn §6's rules R1–R8 into the C99 header the host will compile against — every reached type laid out, every size and every cap relation enforced by the *compiler* rather than asserted by a comment | `verify/c/jpl_emit.ml` + `verify/c/jpl_ast.ml` (shared reader), `verify/c/jpl_emit.sh` (runner: build + emit, `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only`, differential cap fold against the OCaml runtime, byte-compare of the vendored evidence), vendored `verify/c/sh_run_jpl.h` (365 lines) + `verify/c/layout.txt` (109 lines) — **DONE (2026-10-04)**.  *Evidence*: **gate 13/13 → 15/15** — block **2e** runs all four checks over the bytes block 2c bound to a fresh Extraction, block **2e-negative** asserts the oracle roots are *refused for the layout reason* (`a function-typed value has no layout`, on `run`'s `run_phi` driver parameter), which is a different root-sensitivity verdict than 2d-negative's mutual-fixpoint refusal.  40 C types emitted; **34 compile-time assertions** cover them all — 27 aggregate rows each followed by its own `sizeof` check, 13 one-word typedefs (scalars, handles, the all-nullary variant) covered conjunctively by `jpl_check_one_word_families`, plus the 5 cap relations and the word-width check; 31 prototypes emitted, **5 PENDING** (the polymorphic bindings, with their caller counts, because R8 refuses to invent an instance), and 5 bounded static pools totalling **187.0 KiB**.  *What this layer measured and §6 now records*: five shipped functions need monomorphization (`length, app, rev, rev_append, forallb`, 2–6 call sites each); only `cmd` reaches itself, so §6's "recursive types" sentence needed halving; and **the word slab cannot be sized** — no cap bounds the number of live `text` values, so `jpl_word_pool[]` is declared without a dimension and the model owes a `MAX_WORDS` before 5-B.3 can link (see §6, §6.2, and decision 3).  *Self-correction on the same day*: the report's first line claimed "40 C types emitted, each followed by a sizeof check", which the header disproved (27 of 40); the claim is now measured by the emitter itself and the family assertion closes the gap, so no emitted type's size is unverified |
-| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2) is gated green as `sh_run_jpl.h`; the lowering half (5-B.3: 6 tail loops → `while`, 9 bounded structural recursions → copy loops, R8's monomorphization census, and the `MAX_WORDS` capacity the word slab needs) is what remains.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate** |
+| 5-B.2 · #39 | **Representation layer**: turn §6's rules R1–R8 into the C99 header the host will compile against — every reached type laid out, every size and every cap relation enforced by the *compiler* rather than asserted by a comment | `verify/c/jpl_emit.ml` + `verify/c/jpl_ast.ml` (shared reader), `verify/c/jpl_emit.sh` (runner: build + emit, `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only`, differential cap fold against the OCaml runtime, byte-compare of the vendored evidence), vendored `verify/c/sh_run_jpl.h` (365 lines) + `verify/c/layout.txt` (109 lines) — **DONE (2026-10-04)**.  *Evidence*: **gate 13/13 → 15/15** — block **2e** runs all four checks over the bytes block 2c bound to a fresh Extraction, block **2e-negative** asserts the oracle roots are *refused for the layout reason* (`a function-typed value has no layout`, on `run`'s `run_phi` driver parameter), which is a different root-sensitivity verdict than 2d-negative's mutual-fixpoint refusal.  40 C types emitted; **34 compile-time assertions** cover them all — 27 aggregate rows each followed by its own `sizeof` check, 13 one-word typedefs (scalars, handles, the all-nullary variant) covered conjunctively by `jpl_check_one_word_families`, plus the 5 cap relations and the word-width check; 31 prototypes emitted, **5 PENDING** (the polymorphic bindings, with their caller counts, because R8 refuses to invent an instance), and 5 bounded static pools totalling **187.0 KiB**.  *What this layer measured and §6 now records*: five shipped functions need monomorphization (`length, app, rev, rev_append, forallb`, 2–6 call sites each); only `cmd` reaches itself, so §6's "recursive types" sentence needed halving; and **the word slab cannot be sized** — no cap bounds the number of live `text` values, so `jpl_word_pool[]` is declared without a dimension and the model owes a `MAX_WORDS` before 5-B.3 can link (see §6, §6.2, and decision 3).  *[Both halves of that last claim were superseded on 2026-10-05 by **5-B.2b**: `sh_jpl.v` §1 gained `MAX_WORDS` with §7.1/§5 behind it, §1.1 exported it as the table's tenth field, and `jpl_word_pool` is now dimensioned — the "cannot link" consequence is gone.  The measurement that produced the claim still stands and is the reason the fix was a model change: no LOCKED cap *is* a word count.]*  *Self-correction on the same day*: the report's first line claimed "40 C types emitted, each followed by a sizeof check", which the header disproved (27 of 40); the claim is now measured by the emitter itself and the family assertion closes the gap, so no emitted type's size is unverified |
+| 5-B.2b · #40 | **`MAX_WORDS`: size the last undimensioned pool from the model, not the emitter.**  5-B.2 left `jpl_word_pool[]` declared without a dimension because no LOCKED cap *is* the number of live `text` cells, and this section's predecessor argument (a `MAX_CMD × MAX_LIST` product) was **per-node and wrong** — `cmd_fits` gates the whole tree, so a tree that fits has at most `2·MAX_CMD` word occurrences.  The stage therefore did not invent a number: it added the two counters the bound needs (`sh_jpl.v` §7.1 `cmd_words`, the honest word-occurrence count; §5 `benv_words`, name+value cells), proved `cmd_words ≤ 2·cmd_count` for the *same* fuel with the attainment exhibited (`Assign` costs 2 words for 1 node, so no tighter uniform factor exists), reflected it through `cmd_fits` into `cmd_fits_words`, placed the constant with `cap_words_order`/`MAX_WORDS_lt_fuel`, and exported it as `jpl_caps_table`'s tenth field so the emitter reads it from the artifact like the other nine | `verify/models/sh_jpl.v` §1 (`MAX_WORDS`, `cap_words_order`, `MAX_WORDS_lt_fuel`), §1.1 (`jpl_words` field, `jpl_caps_okb`, the order chain `jpl_stack ≤ jpl_words ≤ jpl_glob_fuel`), §5 (`benv_words`, `benv_words_le`), §7.1 (`cmd_words_list`/`_pair`/`_pairs`/`cmd_words`, `cmd_words_le_count`, `cmd_fits_unfold`, `cmd_fits_le`, `cmd_fits_words`, 2 attainment Examples); `verify/c/jpl_emit.ml` (`c_words`, the `jpl_words` cap row, `word_layer` sized `headroom × MAX_WORDS`, the two new C assertions `jpl_check_words_is_the_named_sum`/`jpl_check_words_order`, and a "could not size" section that now reports *nothing* undimensioned); `verify/c/jpl_emit.sh` (ten-field probe, guard `9`→`10`); `verify/models/verify_models.sh` block 2e's printed slab line — **DONE (2026-10-05)**.  *Evidence*: gate **15/15** (no new rung; block 2e's differential fold now agrees on **ten** capacities, `jpl_words 16642`, across the emitter's syntactic fold, the OCaml runtime evaluating `jpl_caps_table`, and the emitted `#define`s; block 2d still byte-compares `closure.txt`), `coqc sh_jpl.v` **8.6 s** with `coqchk -o -silent` four `<none>`, parity **66** unchanged, `conformance.sh` **33/33**, header **370 lines / 36 compile-time assertions** and it passes the JPL flag set, six pools dimensioned, bounded static total **33 601.0 KiB** of which the slab is **33 414.0 KiB** (33 284 cells × 1 028 B), report PENDING now **5** (R8's polymorphic bindings only).  *Measured side-effects, both recorded rather than assumed*: the artifact grew **87 → 89** bindings (`mAX_WORDS`, `benv_words`) while the *shipped closure* over roots `mrun_c,step_c` stayed **byte-identical** — the new constants are data outside the control-flow closure, so the lowering pass never sees `MAX_WORDS`, and only the folded numeral reaches C; and `MAX_WORDS`'s `Nat.add` spelling extracts as a call of the artifact's **recursive** `Nat.add` (`ExtrOcamlNatInt` hooks `+`/`*`/`-`/`div`/`modulo`/`divmod`/`max`/`eqb`/`leb` but *not* the qualified `Nat.add` form), i.e. the value 16 642 is produced by 8 192-deep non-tail recursion at module init — correct as measured, and a fact JPL.6's artifact-side census must not mistake for a reachable recursion.  *What this stage does NOT close*: the second `MAX_STACK` summand, whose condition "at most one live frame per source node" is named in §6 and still unwritten (if 5-B.3 refutes it, `MAX_WORDS` rises and the caps table + header re-pin together), and §6.2's headroom factor 2, still a placeholder until the allocation census.  *Proof-engineering finding, recorded because the two spellings prove the same fact and only one is buildable*: the first version of `cmd_fits_words` used `unfold cmd_fits in Hf` and made `sh_jpl.v` exceed **600 s**; isolating it measured the cost as **>45 s at fuel 128 as well as at 4096** (so it is not the numeral), while `rewrite cmd_fits_unfold in Hf` over the identical equation is **5.1 s** — comparing a *term* against its own delta short-circuits, comparing the two sides across an `eq bool … true` forces the fuel-bounded fixpoint to be reduced under all eleven `cmd` branches.  The file carries the four measurements at §7.1 |
+| 5-B.2c | **Make §6.2's decision 1 mean what it says, and put the shared reading in one file.**  Two things this stage found while scoping 5-B.3, both of which would have become bugs in the lowering pass rather than bugs here: **(i)** the emitter declared `cmd`/`frame` *pooled* and then dimensioned only their **list** cells — `sh_run_jpl.h` had 6 `extern` pools and no `jpl_cmd_pool`/`jpl_frame_pool`, so a host linking the node encoding would have had nowhere to allocate a node.  **(ii)** the value-type view (`of_ct`), the constant folder and the cap-table reader lived inside `jpl_emit.ml`, and 5-B.3 needs exactly those three — a second copy in a third tool is the parallel-encoding failure §2 forbids, and two AST walks over one `.mli` is how a transpiler starts disagreeing with its own gate | `verify/c/jpl_emit.ml` (`pool_cap` now yields `(cells, cap macro, why)`; `node_layer` registers its own pool from that triple, so the struct and its allocation are emitted by one rule; `named_layer` refuses a name in `pooled_types` that `pool_cap` does not size, replacing a silent fall-through to `fat_layer`; the report's decision-1 section prints each pooled type's pool and cap macro instead of a hand-typed sentence); `verify/c/jpl_ast.ml` §8-§10 (the shared value-type view, constant folder and cap-table reader, moved out of the emitter — one reader, three consumers: `jpl_front.ml`, `jpl_emit.ml`, `jpl_lower.ml`); `verify/c/jpl_emit.ml` shrank 1074 → 879 lines — vendored `verify/c/sh_run_jpl.h` (376 lines, 76 `typedef`s, 63 `#define`s, **8** `extern` pools, 36 assertions) + `verify/c/layout.txt` (118 lines) re-pinned — **DONE (2026-10-05)**.  *Evidence*: gate **15/15** (block 2e's four checks unchanged in kind: emission, C99 compile of the widened header, the ten-capacity differential fold, byte-compare — and 2e-negative still refuses the oracle roots for the function-typed reason); bounded static total **34 049.0 KiB**, of which the slab **33 414.0 KiB** (98 %) and the two new node pools **448.0 KiB** (`jpl_cmd_pool` 8 192 cells × 16 B, `jpl_frame_pool` 16 384 × 20 B).  *The refactor's own check*: moving §1-§3 of the emitter into the shared reader was verified by re-running the emitter and requiring the vendored bytes to be **identical**, so "same reading" is measured, not claimed.  *Why the node sizes are what they are*: a `jpl_cmd_node` is tag + 4 slots (max ctor arity) = 16 B, a `jpl_frame_node` tag + 4 = 20 B with padding to 20, each followed by its own `jpl_check_*_is_<N>` typedef, so both are compiler-checked.  *What this stage does NOT close*: the headroom 2 on these two pools is the same placeholder decision 3 carries for the other six — the node pools get their per-step allocation census from 5-B.3a, and if it refutes 2 the factor changes for all eight at once |
+| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2, re-pinned by 5-B.2b and 5-B.2c) is gated green as `sh_run_jpl.h`, and the capacity that half was waiting on landed as 5-B.2b; the lowering half (5-B.3: the tail loops → `while`, the bounded structural recursions → copy loops, R8's monomorphization census — the loop/recursion split quoted here as "6 + 9" is 5-B.1's estimate and 5-B.3a re-measures it) is what remains.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate** |
 | JPL.6 · #26 | Mechanical D-60411 *shall*-rule lint gate on emitted C (`clang -std=c99 -Wall -Wextra -Wconversion -Werror` + static analyzer) | *`verify/c/jpl_lint.sh`* — pending |
 | JPL.7 · #27 | C host + differential conformance: C99 == extracted kernel == `/bin/sh` | *`verify/c/*`* + oracle `verify/src/conformance.sh`, `verify/src/cases` — pending |
 
@@ -540,10 +569,10 @@ tracker task status and this rollup must agree.
 
 | Bucket | Stages | Count |
 |---|---|---|
-| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39) | 16 |
+| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39), 5-B.2b (#40) | 17 |
 | 🔵 IN PROGRESS | — | 0 |
-| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3 lowering + `MAX_WORDS`), JPL.6 (#26), JPL.7 (#27) | 3 |
-| **Total** | | **19** |
+| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3 lowering), JPL.6 (#26), JPL.7 (#27) | 3 |
+| **Total** | | **20** |
 
 The row that used to sit here — "⏳ UNNUMBERED follow-up: `expand_it`" — became numbered
 stage **5-A.7** and is now DONE, which is the only scan-side work that stood between the
@@ -625,11 +654,17 @@ under the JPL settings, **66** parity checks bind it to the reference oracle, bl
 same bytes the way the emitter has to — the typed closure from `mrun_c,step_c`, classified
 construct by construct, refused if anything in it is outside the declared subset — and
 block **2e (5-B.2)** now turns that closure's types into the C99 header the host will
-compile against: 40 layouts, each size checked by the compiler, and all nine capacities
+compile against: 40 layouts, each size checked by the compiler, and all ten capacities
 cross-checked between a syntactic constant fold and the OCaml runtime evaluating the same
-extracted term.  Of the decisions open at JPL.5's opening, two are **settled by
-measurement** and one is **half-settled, with the remaining half now named by a missing
-constant rather than by a design choice**:
+extracted term.  5-B.2c (2026-10-05) closed the one gap the derivation left inside its own
+decision 1: `cmd` and `frame` were declared pooled but the header dimensioned only their
+*list* cells, so the type layer now also declares `jpl_cmd_pool` (`JPL_MAX_CMD` cells ×
+headroom) and `jpl_frame_pool` (`JPL_MAX_STACK` cells × headroom) — 8 `extern` pools, bounded
+total **34 049.0 KiB** — and the two halves of the decision are cross-checked by the emitter,
+which refuses a name in `pooled_types` that `pool_cap` does not size rather than letting it
+silently fall through to a by-value layout.  Of the decisions open at JPL.5's opening, two are
+**settled by measurement** and one is **half-settled, with the remaining half now named by a
+missing bound rather than by a design choice**:
 
 1. ~~Which root JPL.6's Rule-6 (no-recursion) lint binds~~ — **closed 2026-10-04 by 5-B.1,
    mechanically.**  The answer was already "the shipped roots", but 5-B.1 turned that from
@@ -639,8 +674,11 @@ constant rather than by a design choice**:
    expand_brace, run, run_seq, run_for, run_case` and exits 1.  Block 2d-negative pins the
    refusal, because a lint that accepts every root is not a gate.  The measured shape:
    artifact **81** bindings / **76** signatures / **14** type declarations *(the current
-   artifact reads **87 / 81 / 15**; 5-B.2a's `jpl_caps_table` export added the record type
-   and its accessors — see §9.1's 5-B.1 row)*; shipped closure
+   artifact reads **89 / 83 / 15**: 5-B.2a's `jpl_caps_table` export added the record type
+   and its accessors → **87 / 81 / 15**, and 5-B.2b's `MAX_WORDS` added `mAX_WORDS` and
+   `benv_words` → **89 / 83 / 15**.  Neither reached the shipped closure, which is still
+   byte-identical over `mrun_c,step_c` — they are data outside the control flow the lowering
+   pass reads; see §9.1's 5-B.1 and 5-B.2b rows)*; shipped closure
    **47** bindings / **17** recursive — and that closure was re-derived a second way (a text
    identifier graph over the same bytes) which returns the **same 47 names and the same 17
    recursive names, set-equal**, so the residual is cross-checked rather than single-sourced.
@@ -687,21 +725,41 @@ constant rather than by a design choice**:
    list, so 5-B.1's "half a MiB" is a *sum of single-kind bounds*, not a simultaneous worst
    case.  Measured instead, from the derived pools: the bounded static total is
    **187.0 KiB** (env 3.0 KiB + three `MAX_LIST` kinds at 16.0 + 16.0 + 24.0 KiB + frame list
-   128.0 KiB), every cell count printed as "n cells × headroom 2".  What is left open is
-   exactly two things, and each now has an owner: **(a)** the word slab has *no* capacity —
-   the model owes `sh_jpl.v` §1 a `MAX_WORDS` with a proof, then an export through
-   `jpl_caps_table` the way 5-B.2a did for the other nine, and until then the header declares
-   `extern jpl_text jpl_word_pool[];` undimensioned and 5-B.3 can lower every control flow
-   but cannot link; **(b)** the per-step allocation bound, which §6.2's headroom 2 explicitly
-   holds as a placeholder, to be replaced by 5-B.3's allocation census and JPL.7's measured
-   high-water mark.  The stage that was tracked here as **5-B.2 / task #39** is DONE; the
-   remaining half lives under JPL.5 (#25) as **5-B.3**.  Strength, restated: the recursivity
+   128.0 KiB), every cell count printed as "n cells × headroom 2".  Two things were left
+   open, and each has an owner: **(a)** the word slab had *no* capacity — CLOSED 2026-10-05
+   the same way 5-B.2a closed the other nine, by the model rather than the emitter:
+   `sh_jpl.v` §1's `MAX_WORDS` with §7.1/§5's proofs behind it (§4.1), exported as
+   `jpl_caps_table`'s tenth field, so the header now declares
+   `extern jpl_text jpl_word_pool[JPL_POOL_WORD];` and 5-B.3 can link; **(b)** the per-step
+   allocation bound, which §6.2's headroom 2 explicitly holds as a placeholder, to be
+   replaced by 5-B.3's allocation census and JPL.7's measured high-water mark.  The stages
+   tracked here as **5-B.2 / #39**, **5-B.2b / #40** and **5-B.2c** are DONE; the remaining
+   half lives under JPL.5 (#25) as **5-B.3**.  **(c)** is the one this section's own text
+   did not foresee, and it was found by scoping 5-B.3 rather than by the layout run: decision
+   1 declared `cmd` and `frame` *pooled* while the emitter dimensioned only their **list**
+   cells, so the header's 6 `extern` pools allocated nothing for the nodes the two types turn
+   into.  5-B.2c (2026-10-05) registered `jpl_cmd_pool` (`JPL_MAX_CMD` cells × headroom,
+   16 B per node ⇒ 128.0 KiB) and `jpl_frame_pool` (`JPL_MAX_STACK` × headroom, 20 B ⇒
+   320.0 KiB) from inside `node_layer`, i.e. from the same rule that emits the node struct,
+   and made the two halves of decision 1 cross-check each other: a name in `pooled_types`
+   that `pool_cap` does not size is a hard refusal, never a silent fall-through to the
+   by-value fat layout.  Strength, restated after all three closes: the recursivity
    that forces the handle encoding is **read off the artifact's own type declarations** (a
-   definition, so certain), the 187.0 KiB and every cell size are **checked by the compiler**
-   (34 `typedef char jpl_check_*[…]` array-bound assertions cover all 40 emitted types: each
-   aggregate row by itself, the one-word typedefs as a family, every cap relation and the word
-   width), the word range 4 096 … 4 194 304 live words is **arithmetic on LOCKED caps**, and
-   the per-step allocation bound is **not established either way**.
+   definition, so certain); every cell size and every cap relation is **checked by the
+   compiler** (36 `typedef char jpl_check_*[…]` array-bound assertions cover all emitted
+   types — each aggregate row by itself, the one-word typedefs as a family, the cap
+   relations and the word width — the two new ones pinning `JPL_MAX_WORDS` to its named sum
+   `2·MAX_STACK + 2·MAX_ENV + 2` and to `MAX_STACK ≤ MAX_WORDS ≤ GLOB_FUEL`); the pools'
+   **34 049.0 KiB** bounded total is compiler-checked arithmetic on the ten artifact-carried
+   caps, of which the tree half and the environment half are **proved in the model**
+   (`cmd_fits_words`, `benv_words_le`) and the expanded-copy half is the **named obligation**
+   "one live frame per source node"; and the per-step allocation bound is **not established
+   either way**.  What closing (a) cost, printed by the same report: the slab alone is
+   **33 414.0 KiB** of that 34 049.0 KiB — **98 %** of everything the type layer asks a host
+   to link, and **52.6×** the seven pools beside it (635.0 KiB, counted in bytes rather
+   than cells) — a number a JPL.7 host has to link, which
+   is why §6 also records the `uint8_t`-codes follow-on instead of leaving it to be
+   rediscovered.
    **5-B.2a (2026-10-04) closed the input side of this decision**: a layout that allocates
    against `MAX_CMD`/`MAX_STACK` needs those numbers *in the artifact*, and four of the nine
    §4.1 caps were not there because only proof code mentioned them.  `sh_jpl.v` §1.1 now
@@ -711,14 +769,22 @@ constant rather than by a design choice**:
    claim the gate now checks rather than asserts: block 2e's differential fold compares the
    emitter's *syntactic* reading of those nine literals against the OCaml runtime
    *evaluating* `jpl_caps_table`, and the emitted `#define`s must equal both.
+   **5-B.2b (2026-10-05) added the tenth the same route**, so the sentence above now reads
+   *nine as exported on 2026-10-04, ten as exported now*: `MAX_WORDS` is a `Definition` in
+   §1, a `jpl_words` field of `jpl_caps`/`jpl_caps_table` in §1.1, pinned by the extended
+   `jpl_caps_okb`/`jpl_caps_are_locked` and placed by `cap_words_order`, and the differential
+   fold in block 2e pairs it by name against the runtime's value (`jpl_words 16642`) like the
+   other nine — so the emitter still holds no number of its own, and that continues to be
+   true only because the artifact carries it.
 
 **Verification state (the empirical net that makes DONE credible):**
 
 | Check | Status | Where |
 |---|---|---|
 | Models gate (coqc + coqchk ×8 + 3 extraction blocks + the two emitter rungs) | **15/15 green** (11/11 until 5-B.1 added block 2d + its negative control → 13/13; 5-B.2 added block 2e + 2e-negative → 15/15) | `verify_models.sh` |
-| Emitted C99 header compiles under the strict JPL flag set | **measured** — `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only` clean over `verify/c/sh_run_jpl.h`; **34 compile-time assertions cover all 40 emitted types** (27 rows carry their own `sizeof` check, 13 one-word typedefs are covered by `jpl_check_one_word_families`, plus 5 cap relations and the word width), so a wrong byte count is a build failure, not a stale comment | `verify/c/jpl_emit.sh` check 2, gate block 2e |
-| The nine capacities agree across the artifact, the fold and the header | **measured** — a probe that carries no number reads `Sh_run_c.jpl_caps_table` at runtime; the emitter's syntactic fold of the same term must match it name-for-name, and each value must appear as `#define JPL_<NAME> <value>u` in the emitted header | `verify/c/jpl_emit.sh` check 3, gate block 2e |
+| Emitted C99 header compiles under the strict JPL flag set | **measured** — `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only` clean over `verify/c/sh_run_jpl.h`; **36 compile-time assertions** cover every emitted type (each aggregate row carries its own `sizeof` check, the 13 one-word typedefs are covered by `jpl_check_one_word_families`) and every cap relation, so a wrong byte count is a build failure, not a stale comment.  34 until 5-B.2b added `jpl_check_words_is_the_named_sum` and `jpl_check_words_order` | `verify/c/jpl_emit.sh` check 2, gate block 2e |
+| The **ten** capacities agree across the artifact, the fold and the header | **measured** — a probe that carries no number reads `Sh_run_c.jpl_caps_table` at runtime; the emitter's syntactic fold of the same term must match it name-for-name, and each value must appear as `#define JPL_<NAME> <value>u` in the emitted header.  Nine until 2026-10-05, when `jpl_words = 16642` became the tenth | `verify/c/jpl_emit.sh` check 3, gate block 2e |
+| Every declared pool has a capacity, including the word slab and the two node pools | **measured** for the dimension (8 `extern` pools, all array-sized from `jpl_caps_table`, total 34 049.0 KiB, the slab 33 414.0 KiB of it, `jpl_cmd_pool` 128.0 KiB and `jpl_frame_pool` 320.0 KiB since 5-B.2c) · **proved** for the tree half (`cmd_fits_words`) and the environment half (`benv_words_le`) · **owed** for the expanded-copy half (the named invariant "one live frame per source node", §6) | `verify/c/layout.txt`, `sh_jpl.v` §1/§5/§7.1, gate block 2e |
 | The layout layer is root-sensitive too (has teeth) | **measured** — roots `run,step,mrun` ⇒ `FATAL: tn: a function-typed value has no layout`, exit 1; the refused value is the oracle cluster's driver parameter (`type run_phi = int -> text list -> cstate -> cstate option`), a *different* reason than 2d-negative's mutual-fixpoint refusal | gate block 2e-negative |
 | Vendored representation evidence is byte-identical to a fresh emit | **measured** — `verify/c/sh_run_jpl.h` + `verify/c/layout.txt` regenerated and `diff -q`'d (`JPL_REGEN=1` to re-pin) | `verify/c/jpl_emit.sh` check 4, gate block 2e |
 | Shipped closure inside the emitter's declared subset, over the vendored bytes | **measured** — `SUBSET OK` over roots `mrun_c,step_c`; inventory byte-compared against `verify/c/closure.txt` | `verify/c/jpl_front.sh`, gate block 2d |
@@ -2046,16 +2112,181 @@ them; the headroom 2 is an admitted placeholder (§6.2's choice 3).  (iii) The t
 in §6.2 are genuinely choices — a reader who disagrees with pooling `frame` changes one
 line and every size below it moves.  (iv) `jpl_word_pool` unsized means the artifact is
 **not linkable**, so the "representation layer DONE" state means "every type the closure
-reaches is laid out and checked", not "the runtime exists".  (v) The emitter stores no
+reaches is laid out and checked", not "the runtime exists".  *[Closed 2026-10-05 by
+5-B.2b: the slab carries `JPL_POOL_WORD`, so 5-B.3 has an extent to lower against instead of
+a declaration with no dimension (nothing links yet — limit (i), a header not a program, is
+unchanged); (ii)'s "derived from caps, not from a proof the machine stays inside them" is
+now half-closed — see the 5-B.2b entry's proved/owed split.]*  (v) The emitter stores no
 semantics: if it ever grows a rule that changes a *behavioural* verdict rather than a
 layout, it has become a second model of the kernel and must be deleted, same as 5-B.1's
 limit (iv).
 
-Next: **5-B.3**, still under JPL.5 (#25) — first the model's `MAX_WORDS` (§1 constant +
-proof + `jpl_caps_table` export, per the standing "increase budgets when needed and prove
-their minimal bounds"), then the lowering pass: 6 tail loops → `while`, 9 length-bounded
-structural recursions → bounded copy loops (leaf `text` copies inline, `cmd`/`frame` lists
-copy handles), the R8 monomorphization instances for the 5 polymorphic bindings, and
-statement-level emission at the step boundary; then JPL.6 (#26) lints the result and JPL.7
-(#27) runs it against `/bin/sh`.
+### JPL.5-B.2b / #40 — DONE (2026-10-05): `MAX_WORDS` in the model, the word slab sized in the header
+
+The instruction was "sh_jpl.v §1's MAX_WORDS constant + proof + `jpl_caps_table` export,
+then 5-B.3's lowering pass".  The first half is what landed; the second half is now
+un-blocked in the only sense that mattered — the header has an extent to lower against.
+
+**The number is a sum, and the sum is the argument.**  `MAX_WORDS = 2·MAX_STACK + 2·MAX_ENV
++ 2 = 16 642` cells: one `MAX_STACK` for the words a pool-admitting source tree holds, a
+second `MAX_STACK` for the runtime-expanded copies an `FFor`/`FCase` frame holds, `2·MAX_ENV`
+for the environment's name and value cells, and 2 for the per-step temporaries.  Three of the
+four are theorems now — `cmd_words_le_count` + `cmd_fits_words` (§7.1), `benv_words_le` (§5),
+`cap_words_order` + `MAX_WORDS_lt_fuel` (§1) — and the fourth is a *named* debt (§6).  The
+alternative this stage rejected was to write `16642` into the model: the caps table would then
+carry a literal no derivation explains, and 5-B.2's "the emitter holds no number of its own"
+would have become false in spirit while staying true in the letter.
+
+**A documentation error was found while sizing, not after.**  §6's previous paragraph asserted
+the live words were bounded by `MAX_CMD × MAX_LIST` (4 194 304) and printed that range in
+`layout.txt` as the honest answer.  It was a *per-node* argument wearing a *per-tree* claim: a
+tree in which every node owns a full word list has `cmd_count` far above `MAX_CMD`, and
+`cmd_fits` refuses it before the machine sees it.  Per tree the bound is `2 · MAX_CMD`, which
+is what §7.1 now proves, and the emitter's "WHAT THIS LAYER COULD NOT SIZE" section prints
+"Nothing" instead of a range.  Consequence for the budget, in both directions: the slab went
+from *unmeasurable* to 33 414.0 KiB, i.e. about **179×** the five pools 5-B.2 had already
+derived (187.0 KiB), because R2's `uint32_t` codes make a cell 1 028 B.  Narrowing the codes
+needs a proved `code < 256`, which `sh_concrete.v` §1 only intends, so the narrowing is
+recorded as a follow-on and the 32 MiB is recorded as the price of not doing it.
+
+**Rocq 9.2 findings, all measured, kept because each cost a compile to learn.**
+
+1. **A definitional unfolding can be quadratic in a fixpoint; a rewrite by the same equation
+   is not.**  The first `cmd_fits_words` began `unfold cmd_fits in Hf` and made `sh_jpl.v`
+   exceed 600 s (killed).  Bisected on copies of the file in a scratch directory: the
+   §1..§7.1 prefix compiles in 4.3 s; the same prefix + a `Corollary` whose hypothesis is
+   already `cmd_count MAX_CMD c <=? MAX_CMD = true` compiles in **5.4 s**; the same prefix +
+   `exact Hf` at the goal `Nat.leb (cmd_count MAX_CMD c) MAX_CMD = true` from a hypothesis
+   `cmd_fits c = true` is **>45 s — and >45 s with the fuel written as 128 as well as 4096**,
+   so the cost is not the size of the numeral.  `sample` on the hung `rocqworker` showed the
+   hot frames to be `Conversion.compare_under`, `CClosure.mk_subs`, `Esubst.push_vars_until`:
+   the kernel is *reducing* the fuel-bounded `cmd_count` under all eleven `cmd` branches in
+   order to compare `cmd_fits c` with its own body across an `eq bool … true`.  Writing the
+   identical equation as a lemma (`cmd_fits_unfold`, by `reflexivity`, ~1.4 s, because there
+   the two sides are compared as *terms* and the heads match after one delta) and reaching the
+   hypothesis with `rewrite cmd_fits_unfold in Hf` is **5.1 s**.  The file carries this at
+   §7.1 because the two spellings are indistinguishable from the statement.
+2. **The earlier "lia over hypotheses mentioning recursive constants is the hazard"
+   hypothesis was wrong, and it is corrected rather than quietly dropped.**  It came from a
+   whole-file bisect that left two causes in the same proof (the `unfold` cast *and* the
+   `assert … by lia`).  Isolating them: `dbl_le` proved by `lia` costs 4 ms, a `lia` step in
+   the same script costs 0.012 s, and the slow variants above contain no `lia` at all.  The
+   final proof still uses `Nat.mul_le_mono_l`/`Nat.le_trans` instead of `lia`, which is now a
+   stated precaution rather than a measured necessity — the measured necessity is the cast.
+3. `unfold A, B` does not reach constants revealed inside `B`'s body in the same command: for
+   `cap_words_order` the list must be `unfold MAX_WORDS, MAX_STACK, MAX_ENV` (outermost
+   first), otherwise the inequality is false for the revealed atoms and `lia` correctly
+   refuses.  `lia` also cannot decide a comparison whose operand is `GLOB_FUEL` (a product
+   body), so that half follows the file's existing convention, `apply Nat.leb_le. vm_compute.
+   reflexivity.`
+4. `vm_compute`/`reflexivity` against the literal `4294967295` **hangs** (Coq nat literals
+   behave unary); `MAX_WORDS_lt_fuel` states the fit against `MAX_FUEL` symbolically instead.
+   The C side has no such problem — `jpl_check_fuel_fits_the_word` compares against
+   `4294967295u` and the compiler decides it.
+5. Right-nested conjunctions destructure by depth, not by name: `cmd_words_le_count`'s
+   `A /\ (B /\ (C /\ D))` gives conj4 alone as `[_ [_ [_ D]]]`, conj1+conj4 as
+   `[A [_ [_ D]]]`, conj2+conj3 as `[_ [B [C _]]]` — one bullet per shape, and the `For`/
+   `Case` bullets instantiate the *pair* slot with `(nil, nil)` because a `list text *
+   list cmd` is not a `[]`.
+6. `destruct pb as [pats body]` leaves `fst (pats, body)` and `snd (pats, body)` standing;
+   `fst snd` has to be in the `cbn` list or the branch's `lia` fails on an unreduced pair.
+
+**Extraction side-effects, measured rather than assumed.**  The artifact went **87 → 89**
+bindings (`mAX_WORDS`, `benv_words`) while the tracked closure over roots `mrun_c,step_c`
+stayed **byte-identical** — new data, no new control flow, so `closure.txt` re-pinned on its
+header line alone.  Two facts about the spelling: `ExtrOcamlNatInt` hooks the `+`/`*`
+*notation* to machine operators but a **qualified `Nat.add` in the source extracts as a call
+of the artifact's own recursive `module Nat.add`**, written in the nat-destruct idiom and
+non-tail at depth `MAX_STACK`; and `jpl_caps_table` is outside the shipped closure, so what
+reaches C is the folded numeral (`JPL_MAX_WORDS 16642u`), verified against the OCaml runtime
+*evaluating* that recursive `add`.  JPL.6 must not read either recursion as reachable from the
+driver.
+
+**Gate and evidence state after #40.**  `verify_models.sh` **15/15** (no new rung; block 2e's
+differential fold now agrees on ten capacities and its printed digest now names the slab's
+capacity instead of its absence), `coqc sh_jpl.v` 8.6 s, `coqchk -o -silent` four `<none>`
+with no `Axiom`/`Parameter`/`Admitted`/`admit`, parity **66** unchanged, `conformance.sh`
+**33/33**, `JPL_REGEN=1 verify/c/jpl_emit.sh` re-pinned `sh_run_jpl.h` (370 lines, 36
+assertions, 6 dimensioned pools) and `layout.txt` (111 lines, PENDING 5 — R8's polymorphic
+bindings only), `JPL_REGEN=1 verify/c/jpl_front.sh` re-pinned `closure.txt`.
+
+**Harness lessons from the same day, because they wasted an hour each.**  `cmd | tail`
+block-buffers, so a long compile looks silent *and* loses output; `coqc -time` prints
+progressively, so a killed run's log still names the last completed command, and
+`perl -e 'alarm shift; exec @ARGV' N coqc x.v` is the portable per-run timeout on macOS (no
+`timeout`/`gtimeout` there); detached `&`/`nohup` jobs do not survive a tool call — use the
+background-task mechanism; and `pkill -f coqc` matches the harness's own shell, which killed
+three of my own compiles before it was replaced with `ps … | grep "[f]ile.v"` and explicit
+PIDs.
+
+**Honest limits after #40.**  (i) The second `MAX_STACK` is a *charged* summand: if 5-B.3
+refutes "one live frame per source node", `MAX_WORDS` rises and the caps table, the header and
+`layout.txt` re-pin together — the debt is named in §6 and no array dimension hides it.
+(ii) The headroom factor 2 is still an admitted placeholder (decision 3's leftover (b)), and
+the per-step allocation bound remains **not established either way**.  (iii) This is still a
+header, not a program: nothing emitted has met JPL.6's shall-rules for function bodies.
+
+**5-B.2c (2026-10-05) — the type layer's own bookkeeping, and one reading instead of three.**
+Scoping 5-B.3 against the artifact found two defects that the layout run itself could not
+find, because both are about what the header *declares but never allocates* and what a second
+tool would have to recompute:
+
+* **Decision 1 was half-implemented.**  `pooled_types = [cmd; frame]` made those two types
+  handles into a node pool, and `node_layer` emitted the node struct — but nothing registered
+  `jpl_cmd_pool`/`jpl_frame_pool`, so the vendored header's 6 `extern` pools dimensioned the
+  word slab and five *list* pools and allocated **no cells for either node kind**.  A JPL.7
+  host would have linked, and the lowering pass would have had nowhere to put a `cmd`.  Fixed
+  by making `pool_cap` return `(cells, cap macro, why)` and having the *same rule that emits
+  the struct* register the pool, so the two cannot drift apart again; `named_layer` now
+  refuses a name in `pooled_types` that `pool_cap` does not size, because the previous
+  fall-through silently chose the by-value fat layout for a type the decision calls pooled.
+* **The reading lived in the wrong file.**  `of_ct` (the value-type view), the constant folder
+  and the cap-table reader were sections of `jpl_emit.ml`, and 5-B.3 needs exactly those
+  three.  They moved to `jpl_ast.ml` §8-§10 — the shared reader the front end already used —
+  so the family is one reader with three consumers (`jpl_front.ml`, `jpl_emit.ml`, and the
+  census `jpl_lower.ml`), and `jpl_emit.ml` went 1074 → 879 lines.  The move was checked the
+  only way that means anything here: re-run the emitter and require the vendored bytes to be
+  **identical**, which they were, so "same reading" is measured rather than claimed.
+
+**Gate and evidence state after 5-B.2c.**  `verify_models.sh` **15/15** (still no new rung:
+block 2e's four checks are unchanged in kind and the widened header is what check 2 compiles;
+2e-negative still refuses the oracle roots with `a function-typed value has no layout`),
+`JPL_REGEN=1 verify/c/jpl_emit.sh` re-pinned `sh_run_jpl.h` (**376** lines, 76 `typedef`s,
+63 `#define`s, **8** dimensioned `extern` pools, **36** compile-time assertions) and
+`layout.txt` (**118** lines, PENDING 5), bounded static total **34 049.0 KiB** with the two
+new node pools contributing **448.0 KiB** (`jpl_cmd_pool` 8 192 × 16 B, `jpl_frame_pool`
+16 384 × 20 B).  No Rocq file changed, so `coqc`/`coqchk`/parity/conformance keep #40's
+numbers (8.6 s, four `<none>`, 66, 33/33); they are quoted as unchanged rather than re-run for
+a tooling-only edit.
+
+**Honest limits after 5-B.2c.**  (i) The two new pools inherit decision 3's headroom 2, so
+they are *also* placeholders; 5-B.3a's census either justifies the factor or replaces it for
+all eight pools at once.  (ii) `jpl_frame_pool` and `jpl_frame_list_pool` now both size
+themselves by `MAX_STACK`, which is honest (§1.1 defines it as `max_stack_from_margin =
+2 · max_cmd_from_margin`, pinned equal to the LOCKED literal by
+`max_stack_from_margin_is_MAX_STACK`) but is the second pool a headroom change will double,
+so the report prints both rows and the multiplication stays visible.  Reading those two rows
+also turned up an obligation this section had never stated: **nothing in the model bounds the
+machine's own stack length**.  `sh_jpl_run.v` §1 defines `stack := list frame` and `cfg.ck`
+carries it, `sh_jpl_run_c.v` pushes onto it at every `enter_*`, and no lemma and no runtime
+guard anywhere in L3–L8 compares `length ck` against `MAX_STACK` — the cap exists in the table
+that sizes the pool, and the machine that fills it never checks.  That is the same debt family
+as `MAX_WORDS`'s second `MAX_STACK` summand, named here rather than left for JPL.7 to discover
+as a silent overwrite.  (iii) The
+`pooled_types`/`pool_cap` cross-check catches a missing cap, not an unnecessary pooling claim:
+a type that is pooled but never reached would still cost its pool — the census is where that
+gets checked.
+
+Next: **5-B.3a**, still under JPL.5 (#25) — the **lowering census**, deliberately a measurement
+taken before any C body is emitted: a per-binding schema table, the R8 monomorphization
+instance set by unifying each call site against the signature, an operator/allocation-class
+census by representation, and the allocation-extent-versus-pool-capacity arithmetic.  It also
+re-measures this file's inherited "6 tail loops + 9 bounded recursions", which is 5-B.1's
+estimate over the 17 recursive bindings: reading those 17 one by one gives **7 fuel-fed tail
+loops** (`glob_it`, `match_any_iter`, `setv_it`, `expand_go`, `enter_case_c`, `mrun_c`,
+`nat_digits`), **3 structural tail loops** (`teqb`, `getv`, `rev_append`), **5 linear non-tail
+folds** (`length`, `app`, `rev`, `forallb`, `branch_need`) and **2 operator aliases** — so the
+two buckets are not 6 + 9 but 7 + 3 + 5, and the census exists to turn that reading into a
+measurement.  Then **5-B.3b** emits the bodies, JPL.6 (#26) lints the result and JPL.7 (#27)
+runs it against `/bin/sh`.
 

@@ -105,6 +105,76 @@ Definition MAX_FUEL  : nat := GLOB_FUEL + 4096.
 
 Definition MAX_STACK : nat := 4096 + 4096.  (* explicit machine stack frames = 8192 *)
 
+(* MAX_WORDS — the capacity of the WORD POOL, added 2026-10-05 because JPL.5-B.2's
+   emitter could size every pool except the slab of `text` cells and had to declare
+   `jpl_word_pool[]` with no dimension (JPL.md §6, §9.2's decision 3(a)).  It is a
+   SUM of already-LOCKED caps, not a new choice, so each summand names the lemma (or
+   the obligation) that pays for it:
+
+     MAX_STACK   the words in a pool-fitting program TREE.  §7.1's cmd_words counts
+                 word occurrences honestly (cmd_count under-counts them: an Assign
+                 node holds two texts but is charged one node) and proves
+                 cmd_words f c <= 2 * cmd_count f c with the same fuel, hence
+                 cmd_fits_words: a tree the MAX_CMD node pool admits holds at most
+                 2 * MAX_CMD = MAX_STACK word cells.  PROVED.
+     MAX_STACK   the same occurrences again, as RUNTIME-EXPANDED copies.  An
+                 FFor/FCase frame holds the expansion of a tree list, so while the
+                 tree is alive its words exist twice in the slab.  This summand is
+                 the OBLIGATION this constant names and does not yet discharge: it
+                 needs the step-machine invariant "at most one live frame per source
+                 node" (§7.2, still to be written).  It is charged at MAX_STACK — the
+                 tree's own bound — rather than absorbed silently, so the debt is
+                 visible in the number.
+     2*MAX_ENV   every pair in a well-formed environment is a name cell plus a value
+                 cell: §5's benv_words_le, from wf_benv's MAX_ENV cap.  PROVED.
+     2           the per-step temporaries that live in neither tree nor environment:
+                 the rendered `$?` status word and the word currently being
+                 expanded.  Both are single cells by construction (b_nat2text and
+                 b_expand refuse anything over MAX_WORD), so this is an allowance of
+                 two CELLS, not of bytes.
+
+   So MAX_WORDS = 8 192 + 8 192 + 256 + 2 = 16 642 cells, one uint32 length plus
+   MAX_WORD uint32 codes each (measured: 1028 bytes per cell, so the slab is the
+   dominant static allocation and JPL.md §9.2's decision 3 keeps it honest).  It sits
+   ABOVE MAX_STACK and BELOW GLOB_FUEL (cap_words_order), which is why §1's
+   total-order chain had to grow rather than absorb it.
+
+   SPELLING.  Written with qualified Nat.add because a 16 642 Coq literal would
+   extract as a 16 642-application Stdlib.Int.succ chain into a vendored artifact,
+   and because the §1.1 driver hooks bind on the qualified names. *)
+Definition MAX_WORDS : nat :=
+  Nat.add (Nat.add MAX_STACK MAX_STACK)
+          (Nat.add (Nat.add MAX_ENV MAX_ENV) (S (S O))).
+
+(* The word pool is the one capacity that is not in the chain MAX_WIDTH … MAX_STACK,
+   so its position in the order is proved separately: it dominates the frame pool it
+   pays for and still fits under the scan budget, hence under MAX_FUEL, hence in the
+   fixed-width word. *)
+Lemma cap_words_order : MAX_STACK <= MAX_WORDS /\ MAX_WORDS <= GLOB_FUEL.
+Proof.
+  (* The left half is pure addition, so the kernel numbers decide it.  The right half
+     compares against GLOB_FUEL, whose body is a PRODUCT: lia leaves the factors
+     symbolic and cannot see the nonlinearity is closed, which is exactly why
+     cap_fuel_order below decides the same comparison by computation. *)
+  split.
+  - unfold MAX_WORDS, MAX_STACK, MAX_ENV. lia.
+  - unfold MAX_WORDS, MAX_STACK, MAX_ENV, GLOB_FUEL. apply Nat.leb_le. vm_compute.
+    reflexivity.
+Qed.
+
+(* The word pool stays under the machine's own fuel budget, so it is below MAX_FUEL
+   and therefore inside the fixed-width word by §1's remark on MAX_FUEL.  Stated as a
+   comparison with MAX_FUEL rather than with 2^32-1 on purpose: a literal 4294967295
+   as a Coq nat is four billion constructors, which no tactic here needs to touch. *)
+Lemma MAX_WORDS_lt_fuel : MAX_WORDS < MAX_FUEL.
+Proof.
+  (* MAX_WORDS <= GLOB_FUEL (cap_words_order) and MAX_FUEL is GLOB_FUEL plus the
+     step allowance, so the pool budget is strictly under the fuel budget.  GLOB_FUEL
+     is deliberately left symbolic here — expanding it would expose the product. *)
+  pose proof (proj2 cap_words_order) as Hw.
+  unfold MAX_FUEL. lia.
+Qed.
+
 (* The caps are totally ordered and MAX_FUEL is now the largest — MAX_STACK sits
    under GLOB_FUEL, which underlies MAX_FUEL (cap_fuel_order below).  Since
    MAX_FUEL = 136 449 is three orders of magnitude below 2^31, every value this
@@ -127,14 +197,15 @@ Proof.
 Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
-   §1.1  The cap table as DATA the extracted artifact carries (5-B.2a)
+   §1.1  The cap table as DATA the extracted artifact carries (5-B.2a; the
+   jpl_words field added 2026-10-05 so JPL.5-B.3 can link — see MAX_WORDS in §1)
 
-   WHY THIS SECTION EXISTS.  JPL.md §6's C layout allocates against all nine
-   constants above, but Coq's Extraction emits a constant only where the
-   *code* mentions it: MAX_WORD, MAX_ENV, MAX_LIST, GLOB_FUEL and MAX_FUEL
-   already reach sh_run_c.ml because a kernel guard compares with them, while
-   MAX_WIDTH, MAX_ARGV, MAX_CMD and MAX_STACK occur in proofs only and would
-   simply be dropped.  The emitter must not keep its own copy of the four —
+   WHY THIS SECTION EXISTS.  JPL.md §6's C layout allocates against every constant
+   above, but Coq's Extraction emits a constant only where the *code* mentions it:
+   MAX_WORD, MAX_ENV, MAX_LIST, GLOB_FUEL and MAX_FUEL already reach sh_run_c.ml
+   because a kernel guard compares with them, while MAX_WIDTH, MAX_ARGV, MAX_CMD,
+   MAX_STACK and MAX_WORDS occur in proofs only and would simply be dropped.  The
+   emitter must not keep its own copy of those five —
    that is a second, unchecked encoding of a LOCKED table, and this project has
    already retired a parallel encoding (sh_model.ml) for exactly that reason.
    So the table is exported as one value that the extraction driver names, and
@@ -188,6 +259,7 @@ Record jpl_caps : Type := JplCaps
   ; jpl_list       : nat   (* any intermediate list length = MAX_LIST    *)
   ; jpl_cmd        : nat   (* cmd node pool capacity       = MAX_CMD     *)
   ; jpl_stack      : nat   (* frame pool capacity          = MAX_STACK   *)
+  ; jpl_words      : nat   (* word (text) pool capacity    = MAX_WORDS   *)
   ; jpl_glob_fuel  : nat   (* one scan's own budget        = GLOB_FUEL   *)
   ; jpl_fuel       : nat   (* steps the machine may be given= MAX_FUEL   *)
   }.
@@ -200,6 +272,7 @@ Definition jpl_caps_table : jpl_caps :=
    ; jpl_list      := MAX_LIST
    ; jpl_cmd       := max_cmd_from_margin
    ; jpl_stack     := max_stack_from_margin
+   ; jpl_words     := MAX_WORDS
    ; jpl_glob_fuel := GLOB_FUEL
    ; jpl_fuel      := MAX_FUEL
   |}.
@@ -230,6 +303,7 @@ Definition jpl_caps_okb : bool :=
   Nat.eqb (jpl_list      jpl_caps_table) MAX_LIST   &&
   Nat.eqb (jpl_cmd       jpl_caps_table) MAX_CMD    &&
   Nat.eqb (jpl_stack     jpl_caps_table) MAX_STACK  &&
+  Nat.eqb (jpl_words     jpl_caps_table) MAX_WORDS  &&
   Nat.eqb (jpl_glob_fuel jpl_caps_table) GLOB_FUEL  &&
   Nat.eqb (jpl_fuel      jpl_caps_table) MAX_FUEL   &&
   Nat.leb (jpl_width     jpl_caps_table) (jpl_word jpl_caps_table) &&
@@ -237,7 +311,8 @@ Definition jpl_caps_okb : bool :=
   Nat.leb (jpl_env       jpl_caps_table) (jpl_list jpl_caps_table) &&
   Nat.leb (jpl_list      jpl_caps_table) (jpl_cmd jpl_caps_table) &&
   Nat.leb (jpl_cmd       jpl_caps_table) (jpl_stack jpl_caps_table) &&
-  Nat.leb (jpl_stack     jpl_caps_table) (jpl_glob_fuel jpl_caps_table) &&
+  Nat.leb (jpl_stack     jpl_caps_table) (jpl_words jpl_caps_table) &&
+  Nat.leb (jpl_words     jpl_caps_table) (jpl_glob_fuel jpl_caps_table) &&
   Nat.leb (jpl_glob_fuel jpl_caps_table) (jpl_fuel jpl_caps_table).
 
 Lemma jpl_caps_are_locked : jpl_caps_okb = true.
@@ -515,6 +590,18 @@ Proof.
   - exfalso. apply Nat.leb_gt in E. lia.
 Qed.
 
+(* benv_words — the number of WORD CELLS a well-formed environment occupies in the
+   slab: one cell per name plus one per value, so twice the pair count.  This is the
+   summand MAX_WORDS pays for in §1, and it is the one summand proved outright rather
+   than owed: wf_benv already caps be_pairs at MAX_ENV. *)
+Definition benv_words (e : benv) : nat := Nat.add (be_len e) (be_len e).
+
+Lemma benv_words_le e (Hw : wf_benv e) : benv_words e <= Nat.add MAX_ENV MAX_ENV.
+Proof.
+  destruct Hw as [_ Hcap].
+  unfold benv_words. lia.
+Qed.
+
 (* ═══════════════════════════════════════════════════════════════════
    §6  Bounded machine state: an 8-bit status plus the bounded environment
 
@@ -598,6 +685,186 @@ Proof. unfold cmd_fits. reflexivity. Qed.
 Example cmd_fits_seq_true_false :
   cmd_fits (Seq (Ext 0 [true_w]) (Ext 0 [false_w])) = true.
 Proof. unfold cmd_fits. reflexivity. Qed.
+
+(* ═══════════════════════════════════════════════════════════════════
+   §7.1  Word OCCURRENCES in a tree: cmd_words, dominated by 2 * cmd_count
+
+   §7's node estimate charges a COARSER price than the word slab pays, and the
+   coarseness is not one-sided: an Assign node holds TWO texts (name and value)
+   but is charged a single node, and a For node's loop variable and a Case node's
+   scrutinee are each a word absorbed into the node's own "+1".  cmd_words counts
+   words honestly — Ext's argv, Assign's two texts, For's variable plus its word
+   list, Case's scrutinee plus every branch pattern — with the same fuel discipline
+   as §7 so it is a safe fixpoint.
+
+   This section's lemma is the domination §1's MAX_WORDS summand rests on: with the
+   SAME fuel, cmd_words is at most TWICE cmd_count.  The factor 2 is exact, not
+   slack: a leaf `Assign k v` has cmd_words = 2 and cmd_count = 1, so equality is
+   attained and no smaller constant is provable from these definitions.
+
+   WHAT THE LEMMA DOES NOT SAY.  It bounds the words in a tree the pool admits; it
+   says nothing about the words a RUNNING program additionally materialises (the
+   expanded list held by an FFor/FCase frame).  That is §1's second summand and it
+   is still an obligation, named there, not discharged here.
+   ═══════════════════════════════════════════════════════════════════ *)
+
+Fixpoint cmd_words_list (f : nat) (l : list cmd) : nat :=
+  match f with
+  | 0 => 0
+  | S f' => match l with
+            | [] => 0
+            | c :: r => cmd_words f' c + cmd_words_list f' r
+            end
+  end
+
+with cmd_words_pair (f : nat) (pb : list text * list cmd) : nat :=
+  match f with
+  | 0 => 0
+  | S f' => length (fst pb) + cmd_words_list f' (snd pb)
+  end
+
+with cmd_words_pairs (f : nat) (l : list (list text * list cmd)) : nat :=
+  match f with
+  | 0 => 0
+  | S f' => match l with
+            | [] => 0
+            | pb :: r => cmd_words_pair f' pb + cmd_words_pairs f' r
+            end
+  end
+
+with cmd_words (f : nat) (c : cmd) : nat :=
+  match f with
+  | 0 => 0
+  | S f' =>
+      match c with
+      | Skip => 0
+      | Ext _ argv => length argv
+      | Assign _ _ => S (S O)
+      | Seq c1 c2 => cmd_words f' c1 + cmd_words f' c2
+      | And c1 c2 => cmd_words f' c1 + cmd_words f' c2
+      | Or c1 c2 => cmd_words f' c1 + cmd_words f' c2
+      | Bang c0 => cmd_words f' c0
+      | If cond t e => cmd_words f' cond + (cmd_words f' t + cmd_words f' e)
+      | While cond body => cmd_words f' cond + cmd_words f' body
+      | For _ ws body => S (length ws) + cmd_words_list f' body
+      | Case _ brs => S (cmd_words_pairs f' brs)
+      end
+  end.
+
+(* One conjunction, so the induction hypothesis carries a bound for every child of
+   every shape (command list, branch pair, branch-pair list, command) at the previous
+   fuel.  The four statements are proved together because cmd_words_list calls
+   cmd_words and vice versa. *)
+Lemma cmd_words_le_count :
+  forall (f : nat) (c : cmd) (l : list cmd)
+         (pl : list (list text * list cmd)) (pb : list text * list cmd),
+      cmd_words_list f l <= 2 * cmd_count_list f l
+  /\  cmd_words_pairs f pl <= 2 * cmd_count_pairs f pl
+  /\  cmd_words_pair f pb <= 2 * cmd_count_pair f pb
+  /\  cmd_words f c <= 2 * cmd_count f c.
+Proof.
+  induction f as [| f' IHf]; intros c l pl pb.
+  - cbn [cmd_words_list cmd_count_list cmd_words_pairs cmd_count_pairs
+         cmd_words_pair cmd_count_pair cmd_words cmd_count]; lia.
+  - split; [ | split; [ | split ] ].
+    (* list of commands: the empty case is 0 <= 0; a cons is one command plus one list *)
+    + destruct l as [| c0 lrest]; cbn [cmd_words_list cmd_count_list].
+      * lia.
+      * pose proof (IHf c0 lrest pl pb) as I.
+        destruct I as [IL [_ [_ IC]]]. lia.
+    (* list of branch pairs: one pair plus one list *)
+    + destruct pl as [| pb0 plrest]; cbn [cmd_words_pairs cmd_count_pairs].
+      * lia.
+      * pose proof (IHf c l plrest pb0) as I.
+        destruct I as [_ [B [C _]]]. lia.
+    (* one branch pair: its pattern list plus its body list.  The pair's projections
+        must be reduced too — destruct pb leaves fst (pats, body) in the goal, which
+        would not match the induction hypothesis's shape. *)
+    + destruct pb as [pats body]. cbn [cmd_words_pair cmd_count_pair fst snd].
+      pose proof (IHf c body pl (nil, nil)) as I. destruct I as [A _]. lia.
+    (* one command: the node's own words against the node's own charge *)
+    + destruct c as [ | idx argv | k v | c1 c2 | c1 c2 | c1 c2 | c0
+                      | cond t e | cond body | var ws body | scrut brs ];
+        cbn [cmd_words cmd_count].
+      * lia.                                       (* Skip: 0 words, 1 node *)
+      * lia.                                       (* Ext: argv <= 2 * S argv *)
+      * lia.                                       (* Assign: 2 = 2 * 1, equality *)
+      * pose proof (IHf c1 l pl pb) as I1. destruct I1 as [_ [_ [_ D1]]].
+        pose proof (IHf c2 l pl pb) as I2. destruct I2 as [_ [_ [_ D2]]]. lia.
+      * pose proof (IHf c1 l pl pb) as I1. destruct I1 as [_ [_ [_ D1]]].
+        pose proof (IHf c2 l pl pb) as I2. destruct I2 as [_ [_ [_ D2]]]. lia.
+      * pose proof (IHf c1 l pl pb) as I1. destruct I1 as [_ [_ [_ D1]]].
+        pose proof (IHf c2 l pl pb) as I2. destruct I2 as [_ [_ [_ D2]]]. lia.
+      * pose proof (IHf c0 l pl pb) as I. destruct I as [_ [_ [_ D]]]. lia.
+      * pose proof (IHf cond l pl pb) as I1. destruct I1 as [_ [_ [_ D1]]].
+        pose proof (IHf t l pl pb) as I2. destruct I2 as [_ [_ [_ D2]]].
+        pose proof (IHf e l pl pb) as I3. destruct I3 as [_ [_ [_ D3]]]. lia.
+      * pose proof (IHf cond l pl pb) as I1. destruct I1 as [_ [_ [_ D1]]].
+        pose proof (IHf body l pl pb) as I2. destruct I2 as [_ [_ [_ D2]]]. lia.
+      * pose proof (IHf Skip body pl (nil, nil)) as I. destruct I as [IL _]. lia.
+      * pose proof (IHf Skip l brs pb) as I. destruct I as [_ [B _]]. lia.
+Qed.
+
+(* The summand §1 pays for: a pool-admitting program holds at most MAX_STACK word
+   cells — two per counted node, and the node budget is MAX_CMD, and
+   MAX_STACK = 2 * MAX_CMD. *)
+
+(* WHY THE BRIDGE IS WRITTEN AS A REWRITE RATHER THAN AN UNFOLD, with the numbers
+   that decided it (measured 2026-10-05 on this file's §1..§7.1 prefix, which
+   itself compiles in 5 s):
+
+     unfold cmd_fits in Hf  +  Nat.leb_le      ->  >600 s, never finished
+     exact Hf  at  (cmd_fits c = true) |- (cmd_count MAX_CMD c <=? MAX_CMD) = true
+                                               ->  >45 s, and >45 s again with the
+                                                  fuel written as 128 instead of 4096
+     rewrite cmd_fits_unfold in Hf  (below)    ->  5.1 s
+     the whole assembly, this file's shape     ->  5.2 s
+
+   The cost is not the size of the fuel numeral (128 is as bad as 4096), it is the
+   fuel-bounded fixpoint being REDUCED during a conversion.  `cmd_fits c` and
+   `Nat.leb (cmd_count MAX_CMD c) MAX_CMD` sit on opposite sides of an `eq bool …
+   true` whose parameter has to be made to match, so the kernel whnf's both sides:
+   whnf of `Nat.leb x MAX_CMD` forces whnf of `cmd_count MAX_CMD c`, which unfolds
+   the fixpoint into the eleven-way `match c with` whose branches each hold another
+   `cmd_count f' …`.  Comparing those branch-by-branch re-enters the same reduction
+   at every depth, so one definitional unfolding costs the whole unrolled recursion
+   tree.  The two sides of `cmd_fits_unfold` are compared as TERMS (head `Nat.leb`
+   on both after one delta, arguments then identical), which short-circuits before
+   any of that — which is why `reflexivity` there is instant and the same equation
+   reached through an `exact`/`unfold` cast is not.  Recorded here because the trap
+   is invisible from the statement: the two spellings prove the same fact. *)
+Lemma cmd_fits_unfold c : cmd_fits c = Nat.leb (cmd_count MAX_CMD c) MAX_CMD.
+Proof. reflexivity. Qed.
+
+Lemma cmd_fits_le c (Hf : cmd_fits c = true) : cmd_count MAX_CMD c <= MAX_CMD.
+Proof.
+  rewrite cmd_fits_unfold in Hf.
+  apply Nat.leb_le.
+  exact Hf.
+Qed.
+
+Corollary cmd_fits_words c (Hf : cmd_fits c = true) : cmd_words MAX_CMD c <= MAX_STACK.
+Proof.
+  pose proof (cmd_fits_le c Hf) as Hc.
+  pose proof (cmd_words_le_count MAX_CMD c [] [] (nil, nil)) as I.
+  destruct I as [_ [_ [_ D]]].
+  (* The chain is cmd_words <= 2*cmd_count <= 2*MAX_CMD = MAX_STACK.  Every step is
+     one stdlib lemma, not `lia`: a linear-arithmetic proof term over an atom that
+     mentions the recursive `cmd_count` drags the same reduction storm into Qed.
+     MAX_STACK stays symbolic for the same reason; the closed-numeral last step is
+     decided by conversion against `Nat.le_refl`, whose argument is a numeral. *)
+  apply Nat.le_trans with (m := 2 * cmd_count MAX_CMD c). { exact D. }
+  apply Nat.le_trans with (m := 2 * MAX_CMD).
+  - apply Nat.mul_le_mono_l. exact Hc.
+  - exact (Nat.le_refl MAX_STACK).
+Qed.
+
+Example cmd_words_assign_is_two : cmd_words 1 (Assign true_w false_w) = 2.
+Proof. reflexivity. Qed.
+
+Example cmd_words_le_count_attained :
+  cmd_words 1 (Assign true_w false_w) = 2 * cmd_count 1 (Assign true_w false_w).
+Proof. reflexivity. Qed.
 
 (* ═══════════════════════════════════════════════════════════════════
    §8  Bounded scan wrappers: expansion and glob matching

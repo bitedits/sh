@@ -128,13 +128,18 @@ val gLOB_FUEL : int
 
 val mAX_FUEL : int
 
+val mAX_STACK : int
+
+val mAX_WORDS : int
+
 val max_cmd_from_margin : int
 
 val max_stack_from_margin : int
 
 type jpl_caps = { jpl_width : int; jpl_word : int; jpl_argv : int;
                   jpl_env : int; jpl_list : int; jpl_cmd : int;
-                  jpl_stack : int; jpl_glob_fuel : int; jpl_fuel : int }
+                  jpl_stack : int; jpl_words : int; jpl_glob_fuel : int;
+                  jpl_fuel : int }
 
 val jpl_caps_table : jpl_caps
 

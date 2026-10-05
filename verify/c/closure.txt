@@ -1,6 +1,6 @@
 INPUT      src/kernel/sh_run_c.ml
            src/kernel/sh_run_c.mli
-artifact   87 bindings, 81 typed signatures, 15 type declarations
+artifact   89 bindings, 83 typed signatures, 15 type declarations
 
 ==== CLOSURE MEMBERS (artifact order) ====
   name                 arity rec  nat-match  self  signature

@@ -73,12 +73,14 @@
 #                        (R1 scalars, R2 the bounded word, R3 cons-cell list pools, R4 tagged
 #                        structs, R5 pairs, R6 records, R7 enum / pooled node / fat struct), every
 #                        struct followed by a C99 compile-time sizeof assertion, and every cap
-#                        relation sh_jpl.v §1 proved re-checked as a typedef array bound.  Where no
-#                        cap bounds a pool the tool emits PENDING and NO dimension: the word slab is
-#                        exactly that case, and layout.txt prints the range the locked caps do
-#                        imply instead of inventing a number.
+#                        relation sh_jpl.v §1 proved re-checked as a typedef array bound.  Every
+#                        pool the header declares carries a capacity: the word slab's is the tenth
+#                        field of the table, MAX_WORDS, which §1 added as the sum
+#                        2*MAX_STACK + 2*MAX_ENV + 2 with one half of it a RECORDED OBLIGATION
+#                        rather than a proof, and layout.txt prints that decomposition instead of
+#                        inventing a number.
 #                        Evidence: ../c/sh_run_jpl.h + ../c/layout.txt, byte-compared anti-rot;
-#                        ../c/jpl_emit.sh additionally diffs the nine folded caps against the
+#                        ../c/jpl_emit.sh additionally diffs the ten folded caps against the
 #                        artifact EVALUATED by the OCaml runtime, and compiles the header with the
 #                        JPL C99 flag set)
 #   - sh_jpl_scan.v      (Rocq/Coq JPL.5-A.1/2/3 bounded-word + iterative-scan layer: the
@@ -440,14 +442,18 @@ else
     printf '%s\n' "$EMIT_PLAIN" | grep '^PASS:' | sed 's/^/    /' || true
     # Both numbers are the evidence's own, read out of the vendored report rather than
     # restated here: the emitter's FUNCTIONS AND VALUES block counts the polymorphic
-    # bindings it refuses to instantiate (R8), and its pool table leaves the word slab
-    # with no dimension because no LOCKED cap is the capacity of a live word.
+    # bindings it refuses to instantiate (R8), and its pool table now sizes every
+    # declared pool — the word slab's capacity is the tenth field of jpl_caps_table.
     PENDING_N="$(awk '/^  PENDING /{print $2}' "$ROOT/../c/layout.txt")"
-    printf '    %s polymorphic bindings are PENDING (no monomorphization yet), and the\n' \
+    printf '    %s polymorphic bindings are PENDING (no monomorphization yet); every\n' \
       "${PENDING_N:-0}"
-    printf '      word slab is declared without a capacity: what this layer could not\n'
-    printf '      derive is recorded in verify/c/layout.txt, not hidden (see its\n'
-    printf '      "WHAT THIS LAYER COULD NOT SIZE" section)\n'
+    printf '      declared pool has a capacity.  The last one, the word slab, is pinned\n'
+    printf '      in the vendored header by the line the emitter wrote:\n'
+    awk '/^#define JPL_POOL_WORD /{print "        " $0; exit}' "$ROOT/../c/sh_run_jpl.h"
+    printf '      MAX_WORDS is 2*MAX_STACK + 2*MAX_ENV + 2: the tree half and the\n'
+    printf '      environment half are proved (sh_jpl.v §7.1 cmd_fits_words, §5\n'
+    printf '      benv_words_le), the expanded-copy half is the recorded obligation\n'
+    printf '      "one live frame per source node" — see layout.txt\n'
     green "PASS: the C99 type layer is derived from the artifact, compiles under the JPL flag set, and its caps match the evaluated kernel"
     PASS=$((PASS + 1))
   else

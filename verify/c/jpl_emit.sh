@@ -11,8 +11,8 @@
 #      pool element, a cap that drifted — fails HERE, in the compiler, and not
 #      in a comment.  C99 has no _Static_assert (that is C11), so this is the
 #      conforming form of the same check.
-#   3  the differential fold: the nine capacities the emitter folded out of the
-#      artifact's SYNTAX agree with the nine fields of jpl_caps_table as the
+#   3  the differential fold: the ten capacities the emitter folded out of the
+#      artifact's SYNTAX agree with the ten fields of jpl_caps_table as the
 #      OCaml runtime EVALUATES them.  Those are two independent readings of the
 #      same extracted term — a constant folder and the interpreter — so their
 #      agreement is the measurement that retires "the folder is right by
@@ -105,7 +105,7 @@ else
 fi
 
 bold "==> check 3: the folded caps vs the artifact evaluated by the OCaml runtime"
-# probe_caps.ml reads the nine fields of the artifact's OWN jpl_caps_table record
+# probe_caps.ml reads the ten fields of the artifact's OWN jpl_caps_table record
 # and prints them.  Names come from the record; values come from the runtime, so
 # this is the second, independent reading of the same extracted term.
 cp "$ML" "$MLI" "$BUILD"
@@ -116,8 +116,8 @@ let () =
     [ ("jpl_width", t.jpl_width); ("jpl_word", t.jpl_word);
       ("jpl_argv", t.jpl_argv); ("jpl_env", t.jpl_env);
       ("jpl_list", t.jpl_list); ("jpl_cmd", t.jpl_cmd);
-      ("jpl_stack", t.jpl_stack); ("jpl_glob_fuel", t.jpl_glob_fuel);
-      ("jpl_fuel", t.jpl_fuel) ]
+      ("jpl_stack", t.jpl_stack); ("jpl_words", t.jpl_words);
+      ("jpl_glob_fuel", t.jpl_glob_fuel); ("jpl_fuel", t.jpl_fuel) ]
 PROBE
 if ! ( cd "$BUILD" \
        && ocamlfind ocamlopt -w -a -o probe_caps sh_run_c.mli sh_run_c.ml probe_caps.ml \
@@ -133,8 +133,8 @@ fi
 awk '/^==== CAPACITIES/,/^$/' "$BUILD/layout.txt" \
   | awk '$1 ~ /^jpl_/ && NF > 3' > "$BUILD/caprows.txt"
 awk '{print $1, $4}' "$BUILD/caprows.txt" | sort > "$BUILD/folded_pairs.txt"
-if [[ "$(wc -l < "$BUILD/caprows.txt" | tr -d ' ')" != "9" ]]; then
-  red "FAIL: the report lists $(wc -l < "$BUILD/caprows.txt" | tr -d ' ') capacities, not the nine of jpl_caps_table"
+if [[ "$(wc -l < "$BUILD/caprows.txt" | tr -d ' ')" != "10" ]]; then
+  red "FAIL: the report lists $(wc -l < "$BUILD/caprows.txt" | tr -d ' ') capacities, not the ten of jpl_caps_table"
   exit 1
 fi
 if ! diff -q "$BUILD/runtime_caps.txt" "$BUILD/folded_pairs.txt" > /dev/null; then
@@ -150,7 +150,7 @@ while read -r macro value; do
     exit 1
   fi
 done < <(awk '{print $3, $4}' "$BUILD/caprows.txt")
-green "PASS: nine capacities agree across the fold, the runtime and the header:"
+green "PASS: ten capacities agree across the fold, the runtime and the header:"
 sed 's/^/    /' "$BUILD/runtime_caps.txt"
 
 bold "==> check 4: the vendored evidence"
