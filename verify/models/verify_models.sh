@@ -79,10 +79,17 @@
 #                        2*MAX_STACK + 2*MAX_ENV + 2 with one half of it a RECORDED OBLIGATION
 #                        rather than a proof, and layout.txt prints that decomposition instead of
 #                        inventing a number.
-#                        Evidence: ../c/sh_run_jpl.h + ../c/layout.txt, byte-compared anti-rot;
-#                        ../c/jpl_emit.sh additionally diffs the ten folded caps against the
-#                        artifact EVALUATED by the OCaml runtime, and compiles the header with the
-#                        JPL C99 flag set)
+#                        Evidence: ../c/sh_run_jpl.h + ../c/sh_run_jpl_pools.c + ../c/layout.txt,
+#                        byte-compared anti-rot; ../c/jpl_emit.sh additionally diffs the ten folded
+#                        caps against the artifact EVALUATED by the OCaml runtime, compiles the
+#                        header with the JPL C99 flag set, COMPILES the pools translation unit
+#                        (§6.6's definitions, without -fsyntax-only), drives every region to its own
+#                        bound with a sweep generated from the header's allocator declarations,
+#                        closes the report's 13 runtime keys against both files, and RE-DERIVES the
+#                        per-word edge tables of §6.7 — the header's constructor comments, the
+#                        initialiser tokens one class at a time, and the .mli's arities with
+#                        parenthesis depth counted — so a table hand-written to agree with the
+#                        emitter cannot pass)
 #   - ../c/jpl_lower.ml  (JPL.5-B.3a the LOWERING CENSUS, plus JPL.5-B.3b-i, the ABI rendering that
 #                        comes out of it: the third of jpl_ast.ml's three consumers, and a
 #                        MEASUREMENT rather than a translation — it decides, before any C body is
@@ -113,10 +120,25 @@
 #                        rendered == closed, prototypes + refusals == rendered, expressible + owed ==
 #                        prototypes, those three against the rendered file's own lines, and the pair
 #                        of headers compiled under 2e's flags — the rung whose teeth only that check
-#                        has, since a diverged naming rule leaves every count untouched.
-#                        Evidence: ../c/lowering.txt + ../c/sh_run_jpl_abi.h, both byte-compared
-#                        anti-rot; ../c/jpl_lower.sh asserts the three zero-counts, the pool
-#                        cross-check, the ABI accounting and the ABI compile)
+#                        has, since a diverged naming rule leaves every count untouched;
+#                        and, as JPL.5-B.3b-ii-a, (vii) the RENDERABILITY TRIAL of §6.4 — the
+#                        licensed scalar set implemented ONCE, as a renderer, and run as a
+#                        question over all 47 members, so a verdict is one of the renderer's
+#                        own runs rather than a second classification that could disagree with
+#                        it.  The 4 bodies it accepts become ../c/sh_run_jpl_bodies.c; the 43
+#                        it refuses are rows naming the pooled type, the §6.3 schema or the
+#                        construct that stopped them, and the six verdicts must partition the
+#                        closure exactly (render_unaccounted == 0).  The same trial then emits
+#                        BOTH halves of its own differential, ../c/jpl_bodies_diff.c and
+#                        ../c/jpl_bodies_diff.ml, from the same rows, so neither driver picks
+#                        the set or the range it tests: each is built and run over 0 … MAX_FUEL
+#                        and the two 136 450-line transcripts must `cmp` identical.
+#                        Evidence: ../c/lowering.txt + ../c/sh_run_jpl_abi.h +
+#                        ../c/sh_run_jpl_bodies.c + both drivers, all five byte-compared
+#                        anti-rot; ../c/jpl_lower.sh asserts the four zero-counts, the pool
+#                        cross-check, the ABI accounting, the renderability partition, the
+#                        resolution of every cited DATA macro in 2e's header, the two compiles
+#                        and the sweep)
 #   - sh_jpl_scan.v      (Rocq/Coq JPL.5-A.1/2/3 bounded-word + iterative-scan layer: the
 #                        bt = bword layer with saturating bt_push/bt_append; the tail loops
 #                        glob_it/glob_iter/match_any_iter, the env getv_it/setv_it, the word
@@ -448,16 +470,28 @@ else
 fi
 echo
 
-# ── 2e. Representation layer (JPL.5-B.2): the C99 type layer, derived ──────
+# ── 2e. Representation layer (JPL.5-B.2 + 5-B.3b-ii-b-1 + 5-B.3b-ii-b-2a): the C99
+#      type layer, its pool runtime and its edge tables, derived ───────────────
 # The emitter writes the types the shipped closure lowers into, sizes every pool
-# from the artifact's own cap table, and puts a C99 compile-time assertion after
-# every struct.  This rung therefore checks four things the proofs cannot:
-# that the emission is repeatable byte-for-byte, that the emitted header is
-# VALID C99 under the JPL flag set (so no sizeof in it is a guess), that the
-# syntactic cap fold agrees with the artifact EVALUATED by the OCaml runtime
-# (two independent readings of one extracted term), and that the vendored
-# evidence has not drifted.  Like 2d it needs no Rocq toolchain.
-bold "==> Representation layer (JPL.5-B.2): emit, compile, differential-fold, byte-compare"
+# from the artifact's own cap table, puts a C99 compile-time assertion after every
+# struct, since 5-B.3b-ii-b-1 also emits the translation unit that DEFINES those
+# pools (§6.6: one bounded region per pool, saturate-to-error at its bound), and
+# since 5-B.3b-ii-b-2a publishes one class PER WORD of every cell in them (§6.7:
+# SCALAR / UNUSED / EDGE(pool), which is what gives "reachable from the roots" a
+# referent).  This rung therefore checks eight things the proofs cannot: that the
+# emission is repeatable byte-for-byte, that the emitted header is VALID C99 under
+# the JPL flag set (so no sizeof in it is a guess), that the pools TU COMPILES rather
+# than merely parses (it is the only C in this tree owning a mutable static, so
+# -Wconversion and -Wsign-conversion now meet real definitions), that the syntactic
+# cap fold agrees with the artifact EVALUATED by the OCaml runtime (two independent
+# readings of one extracted term), that every region is DRIVEN to its own bound by a
+# sweep generated from the header's allocator declarations — so that probe carries no
+# capacity number either — that the report's runtime keys close against the header and
+# the TU, that the edge tables are RE-DERIVED by three further readings that never see
+# a table (the header's constructor comments, the initialiser tokens word by word, and
+# the .mli's arities with parenthesis depth counted), and that the vendored evidence,
+# now three files, has not drifted.  Like 2d it needs no Rocq toolchain.
+bold "==> Representation layer (JPL.5-B.2 + §6.6 pools + §6.7 edge tables): emit, compile, drive, re-derive, fold, byte-compare"
 EMIT="$ROOT/../c/jpl_emit.sh"
 if [[ ! -f "$EMIT" ]]; then
   red "FAIL: verify/c/jpl_emit.sh is missing"
@@ -489,7 +523,20 @@ else
     printf '      environment half are proved (sh_jpl.v §7.1 cmd_fits_words, §5\n'
     printf '      benv_words_le), the expanded-copy half is the recorded obligation\n'
     printf '      "one live frame per source node" — see layout.txt\n'
-    green "PASS: the C99 type layer is derived from the artifact, compiles under the JPL flag set, and its caps match the evaluated kernel"
+    # The runtime's own two numbers, read from the report rather than restated: the
+    # count of allocators §6.6 emitted and the cells they dimension.  The peak column
+    # of check 5's sweep is what decision 4's placeholder will eventually become, and
+    # today it is the capacity of a driven region, not of a running kernel.
+    POOLS_N="$(awk '$1 == "allocators_emitted" {print $2}' "$ROOT/../c/layout.txt")"
+    CELLS_N="$(awk '$1 == "runtime_cells_total" {print $2}' "$ROOT/../c/layout.txt")"
+    printf '    %s pools now have a DEFINITION, not only a declaration: the emitted\n' \
+      "${POOLS_N:-0}"
+    printf '      sh_run_jpl_pools.c compiles %s cells of static storage under the JPL\n' \
+      "${CELLS_N:-0}"
+    printf '      flags and each region was driven to its own bound (served C-1, then\n'
+    printf '      refused, then rewound) — the peak it measured is that bound, so\n'
+    printf '      decision 4 has an instrument; a running kernel still reports 0\n'
+    green "PASS: the C99 type layer, the pool runtime and the per-word edge tables are derived from the artifact, compile under the JPL flag set, hold their bounds when driven, match the evaluated kernel's caps, and the tables agree with three readings that never read a table"
     PASS=$((PASS + 1))
   else
     EMIT_STATUS=$?
@@ -534,7 +581,7 @@ else
 fi
 echo
 
-# ── 2f. Lowering census + ABI rendering (JPL.5-B.3a, 5-B.3b-i): the shape, then its types ─
+# ── 2f. Lowering census + ABI + bodies (JPL.5-B.3a, 5-B.3b-i, 5-B.3b-ii-a): shape, types, bodies
 # This rung reads the same vendored artifact and the same roots as 2d and 2e, and it is
 # deliberately a MEASUREMENT taken before any C body exists: per-binding lowering schema,
 # the R8 instance set resolved at the call sites, where every lambda value sits, which
@@ -550,10 +597,16 @@ echo
 # against the census and against the file they generated (nothing lost, nothing invented,
 # and no refusal §6.3 assigns to no owner), and the pair of headers must compile together
 # under 2e's flags — which is the only rung that notices a value-naming rule that stopped
-# being shared, because the counts are identical when it diverges.  It needs no Rocq
+# being shared, because the counts are identical when it diverges.  5-B.3b-ii-a asks the
+# second question (§6.4): can a body be written at all yet?  Its verdict is not a
+# classification written next to the emitter — it IS the emitter's own trial result over all
+# 47 members — so the six verdicts must partition the closure, the definitions in
+# sh_run_jpl_bodies.c must be one per RENDER row, every DATA macro a body cites must exist
+# in 2e's header, and the two differential drivers the census generates from the same rows
+# must agree over 0 … MAX_FUEL once each side is built and run.  It needs no Rocq
 # toolchain, only ocamlfind + compiler-libs.common + a C99 cc, so it runs even under
 # --skip-coq.
-bold "==> Lowering census + ABI rendering (JPL.5-B.3a, 5-B.3b-i)"
+bold "==> Lowering census + ABI + rendered bodies (JPL.5-B.3a, 5-B.3b-i, 5-B.3b-ii-a)"
 CENSUS="$ROOT/../c/jpl_lower.sh"
 if [[ ! -f "$CENSUS" ]]; then
   red "FAIL: verify/c/jpl_lower.sh is missing"
@@ -571,9 +624,9 @@ elif [[ ! -x "${CC:-/usr/bin/clang}" ]]; then
 else
   if CENSUS_OUT="$("$CENSUS" 2>&1)"; then
     printf '%s\n' "$CENSUS_OUT" | sed 's/\x1b\[[0-9;]*m//g' \
-      | grep -E '^PASS:|^    [a-z_]+ +0$|^    abi_[a-z_]+ |demanded by this walk|byte-identical' \
+      | grep -E '^PASS:|^    [a-z_]+ +0$|^    abi_[a-z_]+ |demanded by this walk|byte-identical|^    (renderability partition|sh_run_jpl_bodies.c|DATA names|transcript variety|jpl_bodies_diff)' \
       | sed 's/^/    /' || true
-    green "PASS: every shipped binding has a lowering schema, the R8 instance set is measured and rendered, every pool it demands exists, and the ABI compiles against the layout"
+    green "PASS: every shipped binding has a lowering schema, the R8 instance set is measured and rendered, every pool it demands exists, the ABI and the rendered bodies compile against the layout, the §6.4 verdicts partition the closure, and the rendered bodies agree with the extracted kernel over all 136 450 swept inputs"
     PASS=$((PASS + 1))
   else
     CENSUS_STATUS=$?
@@ -581,9 +634,12 @@ else
     case $CENSUS_STATUS in
       1) red "FAIL: the census refused the shipped closure, or one of its counts is not"
          red "      zero, or a demanded pool has no declaration, or the ABI is not exactly"
-         red "      the closed instance set, or it does not compile against the emitted"
-         red "      header, or a vendored artifact is stale — in every case the fix is a"
-         red "      model-side rewrite or a rule in the reader, never a fallback here"
+         red "      the closed instance set, or the §6.4 verdicts do not partition the"
+         red "      closure or a cited DATA macro has no #define, or the ABI or a rendered"
+         red "      body does not compile against the emitted header, or the generated C and"
+         red "      OCaml differential drivers disagree over the swept fuel domain, or a"
+         red "      vendored artifact is stale — in every case the fix is a model-side"
+         red "      rewrite or a rule in the reader, never a fallback here"
          FAIL=$((FAIL + 1)) ;;
       *) red "FAIL: lowering census could not run (exit $CENSUS_STATUS)"
          FAIL=$((FAIL + 1)) ;;
@@ -598,15 +654,21 @@ echo
 # lowering schema exists for that root set.  2d refuses those roots as a subset violation
 # and 2e refuses them because its driver is a function-typed value; this rung refuses them
 # as a FIXPOINT, which is the third, independent reading of the same boundary.  The run
-# must also leave the vendored evidence alone: the census is handed an output path, so a
-# refusal that writes a half-rendered header, or a negative control pointed into the tree,
-# would corrupt the artifact the positive rung byte-compares against.
+# must also leave the vendored evidence alone: the census is handed FIVE output paths now —
+# the report, the ABI header, the rendered bodies and both generated differential drivers —
+# so a refusal that wrote any of them, or a negative control pointed into the tree, would
+# corrupt an artifact the positive rungs byte-compare against.  The set itself is counted:
+# cksum skips a file it cannot open, so five checksums is the assertion that makes "all five
+# unchanged" mean five files rather than however many happened to exist.
 bold "==> Lowering census, negative control (oracle roots must be refused)"
 if [[ -f "$CENSUS" ]] && [[ -f "$ROOT/../c/sh_run_jpl.h" ]] \
    && command -v ocamlfind >/dev/null 2>&1 \
    && ocamlfind query compiler-libs.common >/dev/null 2>&1 \
    && [[ -x "${CC:-/usr/bin/clang}" ]]; then
-  NEG_BEFORE="$(cksum "$ROOT/../c/lowering.txt" "$ROOT/../c/sh_run_jpl_abi.h" 2>/dev/null)"
+  # shellcheck disable=SC2086
+  NEG_BEFORE="$(cksum $ROOT/../c/lowering.txt $ROOT/../c/sh_run_jpl_abi.h \
+                      $ROOT/../c/sh_run_jpl_bodies.c $ROOT/../c/jpl_bodies_diff.c \
+                      $ROOT/../c/jpl_bodies_diff.ml 2>/dev/null)"
   if NEG_C_OUT="$(JPL_ROOTS=run,step,mrun "$CENSUS" 2>&1)"; then
     echo "$NEG_C_OUT"
     red "FAIL: the census measured a LOWERING SCHEMA for the oracle closure — but the oracle"
@@ -614,15 +676,24 @@ if [[ -f "$CENSUS" ]] && [[ -f "$ROOT/../c/sh_run_jpl.h" ]] \
     red "      shapes cannot express; the census has no teeth"
     FAIL=$((FAIL + 1))
   else
-    NEG_AFTER="$(cksum "$ROOT/../c/lowering.txt" "$ROOT/../c/sh_run_jpl_abi.h" 2>/dev/null)"
-    if [[ "$NEG_BEFORE" != "$NEG_AFTER" ]]; then
+    # shellcheck disable=SC2086
+    NEG_AFTER="$(cksum $ROOT/../c/lowering.txt $ROOT/../c/sh_run_jpl_abi.h \
+                       $ROOT/../c/sh_run_jpl_bodies.c $ROOT/../c/jpl_bodies_diff.c \
+                       $ROOT/../c/jpl_bodies_diff.ml 2>/dev/null)"
+    NEG_COUNT="$(printf '%s\n' "$NEG_BEFORE" | grep -c .)"
+    if [[ "$NEG_COUNT" != "5" ]]; then
+      red "FAIL: the negative control measured $NEG_COUNT vendored artifact(s), not 5 — the"
+      red "      census writes a report, an ABI header, a bodies TU and two drivers, and an"
+      red "      immutability check over a subset would pass while the missing file changed"
+      FAIL=$((FAIL + 1))
+    elif [[ "$NEG_BEFORE" != "$NEG_AFTER" ]]; then
       red "FAIL: the refused run CHANGED the vendored evidence — a census that refuses must"
       red "      write nothing, or the positive rung's byte-compare describes the negative"
       red "      run's output rather than the shipped closure"
       FAIL=$((FAIL + 1))
     elif echo "$NEG_C_OUT" | grep -q "mutual fixpoint"; then
       echo "$NEG_C_OUT" | grep -E "LOWER REFUSAL|mutual fixpoint" | sed 's/^/    /' || true
-      green "PASS: oracle roots refused as a fixpoint, with both vendored artifacts untouched — the schema verdict is root-sensitive, for the third documented reason"
+      green "PASS: oracle roots refused as a fixpoint, with all five vendored artifacts untouched — the schema verdict is root-sensitive, for the third documented reason"
       PASS=$((PASS + 1))
     else
       echo "$NEG_C_OUT"

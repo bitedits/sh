@@ -248,6 +248,262 @@ roots      mrun_c, step_c  ->  47 bindings, 17 recursive
 ABI CONSISTENT: every closed instance is accounted for, and every refusal
   belongs to a binding §6.3 already lists as a model-side rewrite.
 
+==== RENDERABILITY: WHICH BODIES NEED NO POOL, NO ALLOCATOR AND NO FUNCTION VALUE ====
+  The verdict below is the renderer's OWN trial result, not a class this file
+  assigned: JPL.md §6.4's licensed scalar set is implemented once, above, and run
+  here as a question.  A body the trial refuses is reported in the refusal's own
+  words, so the census cannot claim a body is renderable that the emitter then
+  could not write.
+
+  binding              §6.3 schema                         verdict                what the trial said
+  length               BOUNDED FOLD (non-tail)              OWED-SCHEMA            BOUNDED FOLD (non-tail), and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  app                  BOUNDED FOLD (non-tail)              OWED-SCHEMA            BOUNDED FOLD (non-tail), and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  add                  operator alias                       ALIAS                  the body IS an operator, so C spells it at the use site and no function exists
+  mul                  operator alias                       ALIAS                  the body IS an operator, so C spells it at the use site and no function exists
+  rev                  BOUNDED FOLD (non-tail)              OWED-SCHEMA            BOUNDED FOLD (non-tail), and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  rev_append           structural tail loop                 OWED-SCHEMA            structural tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  forallb              BOUNDED FOLD (non-tail)              OWED-SCHEMA            BOUNDED FOLD (non-tail), and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  teqb                 structural tail loop                 OWED-SCHEMA            structural tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  bstat                straight-line                        RENDER                 no pool, no cell, no function value: the trial rendered it
+  getv                 structural tail loop                 OWED-SCHEMA            structural tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  b_dollar             straight-line                        DATA                   a folded constant (= 36); its C name is JPL_C_B_DOLLAR, which 2e's header already defines
+  b_lbrace             straight-line                        DATA                   a folded constant (= 123); its C name is JPL_C_B_LBRACE, which 2e's header already defines
+  b_rbrace             straight-line                        DATA                   a folded constant (= 125); its C name is JPL_C_B_RBRACE, which 2e's header already defines
+  b_qmark              straight-line                        DATA                   a folded constant (= 63); its C name is JPL_C_B_QMARK, which 2e's header already defines
+  b_uscore             straight-line                        DATA                   a folded constant (= 95); its C name is JPL_C_B_USCORE, which 2e's header already defines
+  b_0                  straight-line                        DATA                   a folded constant (= 48); its C name is JPL_C_B_0, which 2e's header already defines
+  is_digit             straight-line                        RENDER                 no pool, no cell, no function value: the trial rendered it
+  is_alpha             straight-line                        RENDER                 no pool, no cell, no function value: the trial rendered it
+  is_name              straight-line                        RENDER                 no pool, no cell, no function value: the trial rendered it
+  nat_digits           fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  nat2text             fuel idiom, one trip (no self-call)  OWED-REPRESENTATION    builds [] at line 806, whose cells live in jpl_word_pool
+  b_star               straight-line                        DATA                   a folded constant (= 42); its C name is JPL_C_B_STAR, which 2e's header already defines
+  mAX_WORD             straight-line                        DATA                   a folded constant (= 256); its C name is JPL_MAX_WORD, which 2e's header already defines
+  mAX_LIST             straight-line                        DATA                   a folded constant (= 1024); its C name is JPL_MAX_LIST, which 2e's header already defines
+  gLOB_FUEL            straight-line                        DATA                   a folded constant (= 132353); its C name is JPL_GLOB_FUEL, which 2e's header already defines
+  mAX_FUEL             straight-line                        DATA                   a folded constant (= 136449); its C name is JPL_MAX_FUEL, which 2e's header already defines
+  raw_bword            straight-line                        OWED-REPRESENTATION    takes or returns jpl_word_pool, whose cells decision 3's step-boundary copying produces
+  isz                  straight-line                        OWED-CONSTRUCT         a parameter or result that is not a scalar
+  enter_seq            fuel idiom, one trip (no self-call)  OWED-REPRESENTATION    builds :: at line 4615, whose cells live in jpl_frame_list_pool
+  glob_it              fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 5 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  glob_iter            straight-line                        OWED-REPRESENTATION    takes or returns jpl_word_pool, whose cells decision 3's step-boundary copying produces
+  match_any_iter       fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  branch_need          BOUNDED FOLD (non-tail)              OWED-SCHEMA            BOUNDED FOLD (non-tail), and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  branch_guardb        straight-line                        OWED-REPRESENTATION    takes or returns jpl_word_pool, whose cells decision 3's step-boundary copying produces
+  setv_it              fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  ek_value             straight-line                        OWED-REPRESENTATION    builds [] at line 4891, whose cells live in jpl_word_pool
+  expand_go            fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 9 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  expand_it            straight-line                        OWED-REPRESENTATION    builds [] at line 4953, whose cells live in jpl_word_pool
+  expand_c             straight-line                        OWED-REPRESENTATION    takes or returns jpl_word_pool, whose cells decision 3's step-boundary copying produces
+  assign_c             straight-line                        OWED-REPRESENTATION    builds [] at line 4964, whose cells live in jpl_pair_text_text_list_pool
+  bind_word_o          straight-line                        OWED-REPRESENTATION    builds [] at line 4974, whose cells live in jpl_pair_text_text_list_pool
+  enter_for_c          fuel idiom, one trip (no self-call)  OWED-REPRESENTATION    builds :: at line 4998, whose cells live in jpl_frame_list_pool
+  enter_case_c         fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+  step_cmd_c           fuel idiom, one trip (no self-call)  OWED-REPRESENTATION    builds :: at line 5048, whose cells live in jpl_frame_list_pool
+  step_ret_c           straight-line                        OWED-REPRESENTATION    builds While at line 5083, whose cells live in jpl_cmd_pool
+  step_c               straight-line                        OWED-CONSTRUCT         a parameter or result that is not a scalar
+  mrun_c               fuel tail loop                       OWED-SCHEMA            fuel tail loop, and 1 direct self-call(s) have no statement form until §6.3's
+     rewrite for this schema lands
+
+  RENDERED BODIES (4), and what each one cites:
+
+  jpl_bstat
+    cites   (no data constant)
+    calls   (no other binding)
+    arity   1, sweep EXHAUSTIVE over 0 … MAX_FUEL (its one nat argument is the index)
+
+  jpl_is_digit
+    cites   JPL_C_B_0
+    calls   (no other binding)
+    arity   1, sweep EXHAUSTIVE over 0 … MAX_FUEL (its one nat argument is the index)
+
+  jpl_is_alpha
+    cites   (no data constant)
+    calls   (no other binding)
+    arity   1, sweep EXHAUSTIVE over 0 … MAX_FUEL (its one nat argument is the index)
+
+  jpl_is_name
+    cites   JPL_C_B_USCORE
+    calls   is_alpha, is_digit
+    arity   1, sweep EXHAUSTIVE over 0 … MAX_FUEL (its one nat argument is the index)
+
+  RENDER PARTITION (every closure member, exactly once)
+  DATA                       11   data_bindings            arity-0 constants; the header already names them
+  ALIAS                       2   alias_bindings           bodies that ARE an operator, so no function is emitted
+  RENDER                      4   bodies_renderable        no pool, no cell, no function value: emitted here
+  OWED-REPRESENTATION        13   owed_representation      touch a pooled value, to build it or to read it
+  OWED-SCHEMA                15   owed_schema              their §6.3 shape has no statement form yet
+  OWED-CONSTRUCT              2   owed_construct           the renderer named the construct it cannot write
+  rows                       47   one verdict per member visited
+  render_unaccounted          0   a member that received no verdict; must be 0
+  bodies_citing_data          2   rendered bodies that cite a data constant by its header macro
+
+  THE DATA NAMES A RENDERED BODY CAN RESOLVE TO (the gate finds each one
+  as a #define in sh_run_jpl.h)
+  DATA-MACRO b_dollar       JPL_C_B_DOLLAR
+  DATA-MACRO b_lbrace       JPL_C_B_LBRACE
+  DATA-MACRO b_rbrace       JPL_C_B_RBRACE
+  DATA-MACRO b_qmark        JPL_C_B_QMARK
+  DATA-MACRO b_uscore       JPL_C_B_USCORE
+  DATA-MACRO b_0            JPL_C_B_0
+  DATA-MACRO b_star         JPL_C_B_STAR
+  DATA-MACRO mAX_WORD       JPL_MAX_WORD
+  DATA-MACRO mAX_LIST       JPL_MAX_LIST
+  DATA-MACRO gLOB_FUEL      JPL_GLOB_FUEL
+  DATA-MACRO mAX_FUEL       JPL_MAX_FUEL
+
+  THE DIFFERENTIAL THE GATE RUNS ON THE RENDERED BODIES
+    domain     0 … 136449  (MAX_FUEL, read from the artifact's own jpl_caps_table:
+               the same cap the C allocates against, so neither driver picks
+               a range for the claim it is testing)
+    lines      136450 per driver, one per index, one field per body in artifact order
+               (the two drivers are GENERATED from these same RENDER rows, so a
+               body the census invented a test for would show up as a
+               transcript whose field count disagrees with this report)
+    bodies     4 rendered: 4 swept EXHAUSTIVELY (one nat parameter = the index),
+               0 swept on the DIAGONAL
+
+  FINDING, with an owner (not a failure): 2 alias binding(s) have a
+  prototype in sh_run_jpl.h and no definition anywhere, because their body
+  IS a C operator.  Either the representation layer drops those prototypes or
+  JPL.6's lint forbids calling them by name; inventing a definition here
+  would be a second lowering of an operator §6.3 already replaced.
+    jpl_add              operator alias
+    jpl_mul              operator alias
+
+RENDERABILITY CONSISTENT: 47 of 47 members carry one verdict each, and the 4
+  rendered bodies are the ones this file can actually print — which is the only
+  sense in which a body is renderable.
+
+==== THE SECOND DEBT: WHAT AN OWED ROW ALSO TOUCHES (JPL.md §6.5) ====
+  A row has ONE verdict because §6.4's rules run in dependency order and the first
+  match owns it.  A row can still owe TWO debts: §6.3's shape and §6.2/decision 3's
+  representation.  The two columns below are the readings the renderability trial
+  already consults, asked of every member rather than only of the one that won — so
+  this section cannot claim a pool the trial declined to look at, and it changes no
+  verdict.
+
+  binding              §6.4 verdict         §6.3   pool  free as   pools the walk sees, or why it sees none
+  length               OWED-SCHEMA           yes     no    var       no cell — 1 position(s) whose type the interface has not decided
+  app                  OWED-SCHEMA           yes     no    var       no cell — 6 position(s) whose type the interface has not decided
+  add                  ALIAS                 no      no    scalar    no cell — every position is nat/bool/unit
+  mul                  ALIAS                 no      no    scalar    no cell — every position is nat/bool/unit
+  rev                  OWED-SCHEMA           yes     no    var       no cell — 7 position(s) whose type the interface has not decided
+  rev_append           OWED-SCHEMA           yes     no    var       no cell — 6 position(s) whose type the interface has not decided
+  forallb              OWED-SCHEMA           yes     no    var       no cell — 2 position(s) whose type the interface has not decided
+  teqb                 OWED-SCHEMA           yes     yes   -         jpl_word_pool
+  bstat                RENDER                no      no    scalar    no cell — every position is nat/bool/unit
+  getv                 OWED-SCHEMA           yes     yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  b_dollar             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  b_lbrace             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  b_rbrace             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  b_qmark              DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  b_uscore             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  b_0                  DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  is_digit             RENDER                no      no    scalar    no cell — every position is nat/bool/unit
+  is_alpha             RENDER                no      no    scalar    no cell — every position is nat/bool/unit
+  is_name              RENDER                no      no    scalar    no cell — every position is nat/bool/unit
+  nat_digits           OWED-SCHEMA           yes     yes   -         jpl_word_pool
+  nat2text             OWED-REPRESENTATION   no      yes   -         jpl_word_pool
+  b_star               DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  mAX_WORD             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  mAX_LIST             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  gLOB_FUEL            DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  mAX_FUEL             DATA                  no      no    scalar    no cell — every position is nat/bool/unit
+  raw_bword            OWED-REPRESENTATION   no      yes   -         jpl_word_pool
+  isz                  OWED-CONSTRUCT        no      no    opaque    no cell — cstate (a declared type whose fields this walk does not enter)
+  enter_seq            OWED-REPRESENTATION   no      yes   -         jpl_cmd_list_pool, jpl_frame_list_pool
+  glob_it              OWED-SCHEMA           yes     yes   -         jpl_word_pool
+  glob_iter            OWED-REPRESENTATION   no      yes   -         jpl_word_pool
+  match_any_iter       OWED-SCHEMA           yes     yes   -         jpl_text_list_pool, jpl_word_pool
+  branch_need          OWED-SCHEMA           yes     yes   -         jpl_text_list_pool, jpl_word_pool
+  branch_guardb        OWED-REPRESENTATION   no      yes   -         jpl_text_list_pool, jpl_word_pool
+  setv_it              OWED-SCHEMA           yes     yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  ek_value             OWED-REPRESENTATION   no      yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  expand_go            OWED-SCHEMA           yes     yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  expand_it            OWED-REPRESENTATION   no      yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  expand_c             OWED-REPRESENTATION   no      yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  assign_c             OWED-REPRESENTATION   no      yes   -         jpl_frame_list_pool, jpl_pair_text_text_list_pool, jpl_word_pool
+  bind_word_o          OWED-REPRESENTATION   no      yes   -         jpl_pair_text_text_list_pool, jpl_word_pool
+  enter_for_c          OWED-REPRESENTATION   no      yes   -         jpl_cmd_list_pool, jpl_frame_list_pool, jpl_text_list_pool, jpl_word_pool
+  enter_case_c         OWED-SCHEMA           yes     yes   -         jpl_frame_list_pool, jpl_pair_text_list_cmd_list_list_pool, jpl_word_pool
+  step_cmd_c           OWED-REPRESENTATION   no      yes   -         jpl_cmd_pool, jpl_frame_list_pool, jpl_text_list_pool
+  step_ret_c           OWED-REPRESENTATION   no      yes   -         jpl_cmd_pool, jpl_frame_list_pool
+  step_c               OWED-CONSTRUCT        no      no    opaque    no cell — cfg, out (a declared type whose fields this walk does not enter)
+  mrun_c               OWED-SCHEMA           yes     yes   -         jpl_frame_list_pool, jpl_text_list_pool
+
+  THE SHAPE SET, SPLIT BY ITS SECOND DEBT (15 OWED-SCHEMA rows)
+  owed_schema_also_pool                    10   a §6.3 shape AND a pool: the loop form alone renders nothing
+  owed_schema_pool_free                     5   no pool THIS WALK can see — read the reason rows below, never this number, as freedom
+  owed_schema_pool_free_var                 5   a position is still a TYPE VARIABLE, so the interface never decided the cell
+  owed_schema_pool_free_opaque              0   a position is a declared record/variant whose fields the walk does not enter
+  owed_schema_pool_free_scalar              0   every position is nat/bool/unit: pool-free in the sense ii-b-3 could use today
+  owed_construct_also_pool                  0   an OWED-CONSTRUCT row that also touches a pool: 0 is the §6.4 rule order holding, since
+     the trial consults pools BEFORE it consults its licensed set
+  dual_debt_rows                           10   rows carrying BOTH debts, counted over every refused verdict
+  owed_schema_free_var_pooled_instance      4   variable-classified schema rows whose closed instance in sh_run_jpl_abi.h IS pooled
+  rows (both columns, every member)        47   the same 47 §6.4 partitions, read twice instead of once
+
+  THE DUAL ROWS, ONE LINE EACH (10 of the 23 refused rows that touch a pool;
+                  the other 13 are the §6.4 OWED-REPRESENTATION rows, which carry the pool and
+                  no shape — 10 + 0 + 13 = 23 is asserted by 2f's check 5)
+    teqb               structural tail loop                   OWED-SCHEMA           jpl_word_pool
+    getv               structural tail loop                   OWED-SCHEMA           jpl_pair_text_text_list_pool, jpl_word_pool
+    nat_digits         fuel tail loop                         OWED-SCHEMA           jpl_word_pool
+    glob_it            fuel tail loop                         OWED-SCHEMA           jpl_word_pool
+    match_any_iter     fuel tail loop                         OWED-SCHEMA           jpl_text_list_pool, jpl_word_pool
+    branch_need        BOUNDED FOLD (non-tail)                OWED-SCHEMA           jpl_text_list_pool, jpl_word_pool
+    setv_it            fuel tail loop                         OWED-SCHEMA           jpl_pair_text_text_list_pool, jpl_word_pool
+    expand_go          fuel tail loop                         OWED-SCHEMA           jpl_pair_text_text_list_pool, jpl_word_pool
+    enter_case_c       fuel tail loop                         OWED-SCHEMA           jpl_frame_list_pool, jpl_pair_text_list_cmd_list_list_pool, jpl_word_pool
+    mrun_c             fuel tail loop                         OWED-SCHEMA           jpl_frame_list_pool, jpl_text_list_pool
+
+  WHAT THE ABI ALREADY DECIDED ABOUT THE VARIABLE-CLASSIFIED ROWS
+  A row above whose signature carries a type variable is pool-free only while the
+  interface is the authority: §6.3's instance set closes the same variable at the
+  CALL SITES, and sh_run_jpl_abi.h is the artifact's answer.  This is one
+  measurement read against another, not a third claim about the bytes.
+    length             2 closed instance(s) — POOLED as jpl_text_list_pool, jpl_word_pool
+    app                0 closed instance(s) — the shipped closure never closed it (§6.3's open set)
+    rev                1 closed instance(s) — POOLED as jpl_word_pool
+    rev_append         2 closed instance(s) — POOLED as jpl_pair_text_text_list_pool, jpl_word_pool
+    forallb            1 closed instance(s) — POOLED as jpl_text_list_pool, jpl_word_pool
+
+  THE READING THIS COLUMN EXISTS FOR: 10 of the 15 §6.3-shape rows carry the
+  representation debt as well; 5 more are pool-free only because a TYPE VARIABLE
+  is unresolved (and 4 of those have a closed instance that IS pooled, so the
+  cell type exists and only this walk could not see it); 0 are pool-free because
+  the walk stops at a declared type's FIELDS; 0 are pool-free in the plain sense.
+  A `while' statement form therefore renders bodies only where that last number is
+  nonzero, and §6.5 puts ii-b-1 and ii-b-2 before ii-b-3 and ii-b-4 because this
+  measures it, not because the plan prefers it.
+
+  A FLOOR, NOT A CEILING: this walk reads aliases, lists, options, pairs and
+  arrows, and stops at a declared record or variant.  That is why 2e's header
+  declares jpl_frame_pool (§6.2's decision 1) while the census demands no frame
+  NODE cell from anything: the machine's stack reaches the roots through cfg and
+  cstate, behind a field boundary.  Every pool-free count above is a FLOOR.
+  Entering record fields would move rows between §6.4's verdicts, so it is a
+  slice of its own and not something this section does quietly.
+  debt_unaccounted                          0   a row whose debts do not explain its verdict; must be 0
+
+DEBTS CONSISTENT: every verdict in the partition is explained by the debts
+  measured on the same row — 30 refused members, 10 of them carrying both.
+
 ==== SIGNATURE CONSISTENCY (each body unified against the interface it exports) ====
   No row here re-derives a type: the `.mli`'s type is pushed DOWN into the
   body and every use is unified against it, so what this section can find is
@@ -505,3 +761,23 @@ CENSUS COMPLETE: 47 members, 7 pools demanded, 4 bound checks against the
   abi_bodies_expressible       2       prototypes whose binding has a C form under §6.3
   abi_bodies_owed              3       prototypes whose body waits on a model-side rewrite
   abi_blocked_outside_fold_set 0       a refusal §6.3 assigns to no owner; must be 0
+  data_bindings                11      members that are a folded constant the header already names
+  alias_bindings               2       members whose body IS an operator, so no function is emitted
+  bodies_renderable            4       members the §6.4 render trial accepted, and emitted as C
+  owed_representation          13      members that build or read a pooled cell
+  owed_schema                  15      members whose §6.3 shape has no statement form yet
+  owed_construct               2       members the renderer refused, in the refusal's own words
+  bodies_citing_data           2       rendered bodies that cite a data constant by its header macro
+  render_unaccounted           0       a member that received no verdict; must be 0
+  sweep_domain                 136449  the last index both generated drivers sweep (the artifact's MAX_FUEL)
+  bodies_swept_exhaustive      4       rendered bodies whose whole bounded domain the sweep covers
+  bodies_swept_diagonal        0       rendered bodies the sweep only exercises along one diagonal
+  owed_schema_also_pool        10      members owing a §6.3 shape AND a pool (§6.5's dual debt)
+  owed_schema_pool_free        5       members owing a §6.3 shape and no pool THIS WALK sees
+  owed_schema_pool_free_var    5       of those: a position the interface left a type variable
+  owed_schema_pool_free_opaque 0       of those: a position behind a declared type's fields
+  owed_schema_pool_free_scalar 0       of those: pool-free in the sense a loop form could use today
+  owed_schema_free_var_pooled_instance 4       of those, rows whose closed instance in the ABI header IS pooled
+  owed_construct_also_pool     0       members refused for a construct that also touch a pool; must be 0
+  dual_debt_rows               10      refused members carrying both the shape debt and the pool debt
+  debt_unaccounted             0       a verdict its own row's debts do not explain; must be 0

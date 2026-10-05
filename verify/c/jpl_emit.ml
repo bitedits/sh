@@ -134,6 +134,9 @@ let headroom = 2
 let tags_b = Buffer.create 2048
 let types_b = Buffer.create 8192
 let pools_b = Buffer.create 4096
+let runtime_b = Buffer.create 4096
+let edges_b = Buffer.create 4096
+let edge_defs_b = Buffer.create 8192
 let protos_b = Buffer.create 4096
 
 let emit b fmt = Printf.ksprintf (fun s -> Buffer.add_string b s) fmt
@@ -152,10 +155,91 @@ let row_order : string list ref = ref []
 
 type pool =
   { p_elem : string; p_arr : string; p_count : int option; p_from : string;
-    p_why : string }
+    p_why : string;
+    (* The handle type this pool's cells are reached through, recorded by whichever rule
+       registered the pool.  Every handle is a `uint32_t`, so C cannot tell a word handle
+       from a cmd handle; the registry can, and JPL.md §6.6's allocator returns the one it
+       was given instead of a bare `jpl_ref` — which is what lets a lowering ask "what
+       allocates a value of this type?" without a table of pool names of its own. *)
+    p_handle : string }
 
 let pools : pool list ref = ref []
 let findings : string list ref = ref []
+
+(* A pool's STEM is the one substring three things need: the capacity macro
+   JPL_POOL_<KIND>, the runtime names jpl_<stem>_alloc / _reset / _is_live and its four
+   counters.  It is read out of the array name the registering rule chose, so a pool
+   renamed by decision 1 renames its allocator, its counters and its macro in one keystroke
+   — a second spelling of the stem in this file would be a name a reader could get wrong. *)
+let pool_stem p =
+  let n = String.length p.p_arr in
+  let s0 = if String.sub p.p_arr 0 (min 4 n) = "jpl_" then 4 else 0 in
+  let s1 =
+    if n >= 5 && String.sub p.p_arr (n - 5) 5 = "_pool" then n - 5 else n
+  in
+  String.sub p.p_arr s0 (s1 - s0)
+
+let pool_macro p = "JPL_POOL_" ^ String.uppercase_ascii (pool_stem p)
+
+(* §6.6's rule is bidirectional: no capacity without an allocator, and no allocator for a
+   pool that cannot be sized.  The unsized pools are therefore excluded from the runtime
+   and REPORTED, never skipped quietly — the report's pools_without_capacity key is the
+   count, and the gate asserts the allocators and the sized pools are the same number. *)
+let sized_pools () = List.filter (fun p -> p.p_count <> None) (List.rev !pools)
+
+(* Every symbol the runtime puts in the shared C namespace.  The gate needs this list
+   because §6.3's ABI and §6.6's runtime both emit `jpl_<something>` into one translation
+   unit, so a collision is not a style point but a duplicate definition. *)
+let runtime_names () =
+  let base =
+    List.concat_map
+      (fun p ->
+        let s = pool_stem p in
+        [ "jpl_" ^ s ^ "_next"; "jpl_" ^ s ^ "_peak"; "jpl_" ^ s ^ "_taken";
+          "jpl_" ^ s ^ "_refused"; "jpl_" ^ s ^ "_alloc"; "jpl_" ^ s ^ "_reset";
+          "jpl_" ^ s ^ "_is_live"; "jpl_" ^ s ^ "_edge" ])
+      (sized_pools ())
+  in
+  if base = [] then [] else base @ [ "jpl_pools_refusals" ]
+
+(* ──────────── 6a-bis. the cell shapes the edge tables are derived from ────── *)
+
+(* JPL.md §6.7's first slice needs, for every pool, "what does one cell of this pool point
+   at".  The layout already knows: the rules that emitted the cell's fields walked the
+   declared types to get there.  So the shape is RECORDED by those rules as they run — a
+   table transcribed here would be a second model of the artifact, and §6.7's whole claim is
+   that reachability is read from one reading rather than asserted by another.
+   A position is one WORD — or, for an array field, one ELEMENT — of a cell, in the cell's own
+   field order, so the table's row width is the cell's sizeof divided by the word and the two
+   are cross-checked at compile time.
+     P_tag   — the node's tag word: it SELECTS the row, so it is not itself an edge.
+     P_lt t  — a payload whose declared type the layout resolved.
+     P_tail  — a cons cell's `next`, which is an edge into the pool it lives in.
+     P_leaf t — the words the fields before it left in the cell, one element of `t` per group:
+               an ARRAY field, whose length the cell's width supplies and no declaration does.
+     P_void  — padding past this constructor's arity: a word that was never written. *)
+type position =
+  | P_tag
+  | P_lt of lt
+  | P_tail
+  | P_leaf of lt
+  | P_void
+
+type cell_row = { r_label : string; r_pos : position list }
+
+(* The shape is recorded DURING the layout, but its widths are computed after it: a pooled
+   node's payload types are laid out after the node itself, so their byte sizes — which this
+   reading must use, because they are the numbers the emitted `sizeof` checks pin — do not
+   exist yet when the node registers itself. *)
+type cell_shape =
+  { s_stem : string; s_elem : string; s_tagged : bool; s_rows : cell_row list }
+
+let shapes : (string, cell_shape) Hashtbl.t = Hashtbl.create 8
+
+let record_shape stem elem tagged rows =
+  if not (Hashtbl.mem shapes stem) then
+    Hashtbl.replace shapes stem
+      { s_stem = stem; s_elem = elem; s_tagged = tagged; s_rows = rows }
 
 (* Which rows got a `sizeof` assertion of their own, recorded by sizeof_check itself, so
    the report's count of checked vs family-covered rows is measured, not hand-typed. *)
@@ -250,6 +334,7 @@ and word_layer () =
   pools :=
     { p_elem = "jpl_text"; p_arr = "jpl_word_pool";
       p_count = Some (headroom * (c ()).c_words);
+      p_handle = "jpl_wref";
       p_from = "JPL_MAX_WORDS";
       p_why =
         "sh_jpl.v §1's MAX_WORDS, a sum of the already-locked caps: MAX_STACK cells for\n\
@@ -259,6 +344,13 @@ and word_layer () =
   \    source node\" — named in §1, not yet proved), 2*MAX_ENV for the environment's\n\
   \    name/value cells (§5 benv_words_le), and 2 per-step temporaries." }
     :: !pools;
+  (* §6.7's LEAF case, DERIVED rather than filled: the cell is `{ jpl_nat wt_len; jpl_nat
+     wt_code[JPL_MAX_WORD] }`, so both fields are the type this rule emitted them as, and the
+     array's element count comes from the cell's own width.  Every word therefore resolves
+     through the same walk a payload uses — and none of them is an edge, which is a conclusion
+     here rather than a guess. *)
+  record_shape "word" "jpl_text" false
+    [ { r_label = "len + code[]"; r_pos = [ P_lt L_nat; P_leaf L_nat ] } ];
   ("jpl_wref", w4)   (* = value_name L_word, which is the rule the ABI renderer shares *)
 
 (* R3 *)
@@ -281,8 +373,14 @@ and list_layer e =
   let (cap, macro, why) = list_cap (c ()) e in
   pools :=
     { p_elem = cell; p_arr = "jpl_" ^ k ^ "_pool";
-      p_count = Some (headroom * cap); p_from = macro; p_why = why }
+      p_count = Some (headroom * cap); p_from = macro; p_why = why;
+      p_handle = handle }
     :: !pools;
+  (* One row, because a cons cell has no tag: the hd is a payload of the element type — by
+     value if the element is an aggregate, an edge if it is itself a handle — and the tail is
+     an edge into this pool. *)
+  record_shape k cell false
+    [ { r_label = show_lt e ^ " cell"; r_pos = [ P_lt e; P_tail ] } ];
   (handle, w4)
 
 (* R4 *)
@@ -382,7 +480,8 @@ and node_layer nm (cap, cap_macro, why) =
      @ [ Printf.sprintf "} %s;" node; sizeof_check node sz ]);
   pools :=
     { p_elem = node; p_arr = "jpl_" ^ nm ^ "_pool";
-      p_count = Some (headroom * cap); p_from = cap_macro; p_why = why }
+      p_count = Some (headroom * cap); p_from = cap_macro; p_why = why;
+      p_handle = handle }
     :: !pools;
   emit tags_b "/* tags and slot meanings for %s, from the artifact's declaration order.\n\
               \   A pooled cell has one shape, so a constructor's arguments occupy\n\
@@ -397,6 +496,15 @@ and node_layer nm (cap, cap_macro, why) =
         (if a = [] then " (no payload)" else " of " ^ String.concat ", " a))
     cs;
   emit tags_b "\n";
+  (* The node's rows, recorded for §6.7 before the payload types are laid out below: the
+     positions are the artifact's constructor arguments in order, so a model change to a
+     constructor changes the table in the same run and nothing has to remember it. *)
+  record_shape nm node true
+    (List.map
+       (fun cd ->
+         { r_label = cd.pcd_name.txt;
+           r_pos = P_tag :: List.map (fun t -> P_lt (of_ct t)) (ctor_args cd) })
+       cs);
   (* The payload component types are laid out AFTER the node, so a self-reference
      resolves against the settled handle. *)
   List.iter
@@ -574,14 +682,7 @@ let pools_section () =
     (fun p ->
       match p.p_count with
       | Some n ->
-          let macro =
-            let n = String.length p.p_arr in
-            let s0 = if String.sub p.p_arr 0 (min 4 n) = "jpl_" then 4 else 0 in
-            let s1 =
-              if n >= 5 && String.sub p.p_arr (n - 5) 5 = "_pool" then n - 5 else n
-            in
-            "JPL_POOL_" ^ String.uppercase_ascii (String.sub p.p_arr s0 (s1 - s0))
-          in
+          let macro = pool_macro p in
           emit pools_b "#define %s %du   /* from %s, %d cells, x headroom %d; %s */\n\
                         extern %s %s[%s];\n\n" macro n p.p_from (n / headroom)
             headroom p.p_why p.p_elem p.p_arr macro
@@ -590,6 +691,529 @@ let pools_section () =
                         extern %s %s[];\n\n"
             p.p_arr p.p_why p.p_elem p.p_arr)
     (List.rev !pools)
+
+(* ───────────────── 6b. the pool runtime (JPL.md §6.6, 5-B.3b-ii-b-1) ────── *)
+
+(* The header half: declarations only, so the type layer stays a type layer and every
+   body lives in the generated translation unit below.  What is emitted here is derived
+   from the same `!pools` registry the capacity section above walked, which is the whole
+   point of §6.6's rule — a pool that gained a cell type and a capacity cannot be given a
+   runtime by remembering to write one, and a runtime cannot name a handle the registry
+   never settled. *)
+(* One pool's declarations, assembled line by line from NAMED parts.  The stem, the
+   capacity macro, the cell type and the handle are arguments to each `sprintf` rather
+   than the thirtieth through fortieth position of one format string, because the whole
+   runtime is one design repeated eight times and a half-changed template is precisely the
+   bug a positional format invites. *)
+let runtime_decl p =
+  let s = pool_stem p in
+  let m = pool_macro p in
+  String.concat ""
+    [
+      Printf.sprintf "/* %s: %s of %s cells of %s, handled as %s */\n" s p.p_arr m
+        p.p_elem p.p_handle;
+      Printf.sprintf
+        "extern jpl_ref jpl_%s_next;     /* lowest index never handed out; 1u is an empty\
+         \ region */\n"
+        s;
+      Printf.sprintf
+        "extern jpl_ref jpl_%s_peak;     /* widest any one region got: decision 4's\
+         \ quantity, measured */\n"
+        s;
+      Printf.sprintf "extern jpl_ref jpl_%s_taken;    /* cells served since the program\
+                      \ started */\n"
+        s;
+      Printf.sprintf
+        "extern jpl_ref jpl_%s_refused;  /* allocations that found no cell: §6.6's\
+         \ saturate-to-error edge */\n"
+        s;
+      Printf.sprintf
+        "typedef char jpl_check_%s_capacity_fits_the_counter[((%s < JPL_REF_TOP) ? 1 : -1)];\n"
+        s m;
+      Printf.sprintf "%s jpl_%s_alloc(void);   /* JPL_NIL once the region of %s cells is\
+                      \ full */\n" p.p_handle s m;
+      Printf.sprintf "jpl_ref jpl_%s_reset(void);   /* cells returned; next goes back to\
+                      \ 1u */\n" s;
+      Printf.sprintf "jpl_bool jpl_%s_is_live(jpl_ref h);   /* h names a cell of THIS\
+                      \ region */\n\n"
+        s;
+    ]
+
+let runtime_section () =
+  let ps = sized_pools () in
+  emit runtime_b "/* ── the pool runtime (JPL.md §6.6, 5-B.3b-ii-b-1): one bounded region per\n\
+                \   pool above.  Declarations only — the definitions and bodies are in the\n\
+                \   generated translation unit sh_run_jpl_pools.c, which includes this header,\n\
+                \   and that file is the only C in this tree holding a mutable static.  Index 0\n\
+                \   is JPL_NIL and is never handed out, so a pool of C cells serves C-1.\n\
+                \   Reclamation is at region granularity because a per-cell free needs the\n\
+                \   reachability rule §6.5's ii-b-2 owns before it is safe, not a function; a\n\
+                \   reset does NOT clear cells, since clearing them at every step boundary would\n\
+                \   price the step by the pool rather than by the data and no lemma requires the\n\
+                \   bytes to be zero.  is_live is the guard rail that makes a handle carried\n\
+                \   across a reset observable — not a liveness analysis. */\n";
+  emit runtime_b "#define JPL_REF_TOP 4294967295u   /* counters saturate here, never wrap (§4.2) */\n\
+                  typedef char jpl_check_ref_top_is_the_handle_word[((sizeof (jpl_ref) == 4u) ? 1 : -1)];\n\n";
+  List.iter (fun p -> Buffer.add_string runtime_b (runtime_decl p)) ps;
+  if ps <> [] then
+    emit runtime_b "/* §4.2 wants one observable place: the saturating sum of every pool's refusals.\n\
+                    \   A lowering reads a nil handle as the same edge a fired branch_guardb is\n\
+                    \   (§5), and the host reads this as the run's verdict. */\n\
+                    jpl_nat jpl_pools_refusals(void);\n\n";
+  List.iter
+    (fun p ->
+      match p.p_count with
+      | None ->
+          emit runtime_b "/* NO RUNTIME for %s: it has no capacity, so it can be neither defined\n\
+                          \   nor handed out (§6.6's rule cuts both ways). */\n\n"
+            p.p_arr
+      | Some _ -> ())
+    (List.rev !pools)
+
+(* ───────────── 6c. the pool edge tables (JPL.md §6.7, 5-B.3b-ii-b-2a) ─────── *)
+
+(* R7 stores a pooled node as `tag + n single-word slots`, which erases what a slot MEANS:
+   to the runtime a handle and a count are the same uint32_t.  §6.7's collector therefore
+   cannot be written until the meaning comes back, and it must come back from the SAME
+   reading that laid the cell out — a table typed by hand beside the layout would be two
+   models of one artifact, agreeing today and drifting the first time a constructor changes.
+   So the classes below are computed from the `position`s the layout rules recorded, and the
+   only arithmetic borrowed is the byte width those same rules memoised (`size_of_name`),
+   which is what lets a `jpl_check_*` typedef pin the table against the cell it describes. *)
+(* One class per WORD of a cell, not per declared field: R3 puts a list's element INLINE, so
+   a `(text * text)` cons cell's element is two words with two meanings, and a per-field
+   table would need a second table saying how a field splits.  Flattening to words here makes
+   the identity `NPOS * 4 == sizeof (cell)` exact and lets a collector walk one array with no
+   recursive read of another.  A word is a value, a word this row never writes, or a handle
+   into the pool named by the stem — and the stems come from the registry, so a pool decision
+   1 adds becomes a target class in the same run rather than a name a table has to learn. *)
+type edge_class =
+  | E_scalar
+  | E_unused
+  | E_edge of string
+
+(* The class ids as C.  The two fixed ones are named; an edge names the TARGET pool, and the
+   ids come from the registry, so a pool that is renamed or added renumbers the targets that
+   cite it rather than leaving a table pointing at a name that no longer exists. *)
+let edge_pool_ids () =
+  let stems = List.sort String.compare (List.map pool_stem (List.rev !pools)) in
+  let tbl = Hashtbl.create 16 in
+  List.iteri (fun i s -> Hashtbl.replace tbl s (i + 3)) stems;
+  tbl
+
+let edge_class_macro = function
+  | E_scalar -> "JPL_EDGE_SCALAR"
+  | E_unused -> "JPL_EDGE_UNUSED"
+  | E_edge s -> "JPL_EDGE_TO_" ^ String.uppercase_ascii s ^ "_POOL"
+
+(* Which pool, if any, a value of this lowered type is a HANDLE into.  Read out of the
+   registry by handle name, so decision 1, decision 2 and R2's word exception are answered
+   by the pools the layout actually built rather than by a second copy of their rules. *)
+let edge_target lt =
+  match List.find_opt (fun p -> p.p_handle = value_name lt) (List.rev !pools) with
+  | Some p -> Some (pool_stem p)
+  | None -> None
+
+(* How many words a cell occupies, read from the layout's own memoised size — the same number
+   the emitted `sizeof` check pins, so a table that disagreed with the struct it describes is
+   a compile error and not a comment.  A leaf's single position spans the whole cell, which is
+   why the identity `NPOS * 4 == sizeof (cell)` holds for every pool without an exception. *)
+let edge_cell_words elem =
+  let esz = size_of_name elem in
+  if esz = 0 then
+    fail ("the edge table has no size for the cell type " ^ elem)
+  else if esz mod w4 <> 0 then
+    fail
+      ("cell type " ^ elem ^ " is " ^ string_of_int esz
+      ^ " bytes, not a whole number of words: every emitted struct is a sum of uint32_t, so\n\
+         \   a remainder means the layout and this reading disagree")
+  else esz / w4
+
+(* Which pool each WORD of a declared type is a handle into, in field order.  A handle is one
+   word and the whole answer; a by-value aggregate is flattened into its leaf words.  What
+   the walk can only answer CONDITIONALLY is refused: an option's or a fat variant's payload
+   words mean nothing under one tag value, and a per-word table has no place to say "under
+   which tag" — a collector reading them would forward a stale word as if it were live, which
+   is the failure mode §6.7 refuses to inherit.  Nothing pooled contains one today: R7 checks
+   a node's slots are single words before this runs, and R3's element types are the only
+   aggregates inline in a cell.  If the model later puts a tagged aggregate there, the emitter
+   stops rather than inventing a third table to say what it means. *)
+let rec edge_expand seen t =
+  match edge_target t with
+  | Some s -> [ E_edge s ]
+  | None ->
+      (match t with
+      | L_nat | L_bool | L_unit -> [ E_scalar ]
+      | L_word ->
+          fail
+            "a word reached the edge walk without the word pool answering to its handle name"
+      | L_list _ ->
+          fail
+            ("a list handle reached the edge walk with no pool behind it: decision 2 sizes\n\
+             \   every list kind, so this is a pool the layout registered under a name this\n\
+             \   reading did not find")
+      | L_opt a | L_bres a ->
+          fail
+            ("the edge walk met the tagged aggregate " ^ show_lt t ^ " (payload "
+            ^ show_lt a
+            ^ ") inline in a pooled cell: its payload words are meaningful only under one\n\
+               \   tag, which a per-word class cannot state")
+      | L_pair (a, b) -> edge_expand seen a @ edge_expand seen b
+      | L_named n ->
+          if List.mem n seen then
+            fail
+              ("the edge walk reopened " ^ n ^ " inside itself: the layout refuses a by-value\n\
+                 \   cycle before this point, so reaching one means the two readings disagree")
+          else
+            let d = Hashtbl.find tydecls n in
+            let opens l = List.concat_map (fun x -> edge_expand (n :: seen) x) l in
+            begin
+            match d.ptype_kind with
+            | Ptype_record ls -> opens (List.map (fun x -> of_ct x.pld_type) ls)
+            | Ptype_variant cs ->
+                if List.for_all (fun cd -> ctor_arity cd = 0) cs then [ E_scalar ]
+                else
+                  fail
+                    ("the edge walk met the variant " ^ n
+                    ^ " with payloads: its payload words are selected by a tag, which a\n\
+                       \   per-word class cannot state")
+            | Ptype_abstract ->
+                (match d.ptype_manifest with
+                | Some m -> opens [ of_ct m ]
+                | None ->
+                    fail
+                      ("the edge walk reached the abstract type " ^ n
+                      ^ " with no manifest, so what its words mean is unknowable"))
+            | Ptype_open -> fail ("the edge walk reached the open type " ^ n)
+            | Ptype_external _ ->
+                fail ("the edge walk reached the external type " ^ n)
+            end
+      | L_fun _ -> fail "the edge walk met a function-typed value, which has no layout"
+      | L_var v ->
+          fail ("the edge walk met an un-instantiated type variable: '" ^ v)
+      | L_unk w -> fail ("the edge walk met an un-inferable type: " ^ w))
+
+(* How many positions flattened to more than one word — the sites where a pooled cell holds
+   an aggregate BY VALUE and this reading is what says how many of its words are edges.  The
+   report publishes the count so the gate can assert that the two pair cells are the only
+   ones, rather than that being a claim in a comment. *)
+let edge_flattened : int ref = ref 0
+
+(* The census the report prints: per pool, its cell type, the row count, the words per row,
+   and how the three classes divide those words.  The classes partition a table's entries, so
+   the three counters must sum to rows x words — an identity the gate re-derives from the
+   emitted text rather than trusting here. *)
+let edge_census : (string * string * int * int * int * int * int) list ref = ref []
+
+(* One position's classes.  A P_lt's classes must COVER its own bytes exactly: a payload the walk
+   flattens to a different number of words than the layout sized is the two readings of one
+   declaration disagreeing, and the table would then describe a struct that does not exist.
+   P_leaf is not answerable here because an array's element count is a property of the ROW, so
+   edge_row handles it and hands back the classes of one element by asking this function. *)
+let edge_classes_of p pos =
+  match pos with
+  | P_tag -> [ E_scalar ]
+  | P_void -> [ E_unused ]
+  | P_tail ->
+      (* A cons cell's tail is an edge into the pool the cell itself lives in — the one edge
+         this reading can only learn from its enclosing pool, because `jpl_ref` is handle-typed
+         and pool-less until the cell registers itself. *)
+      [ E_edge (pool_stem p) ]
+  | P_lt t ->
+      let c = edge_expand [] t in
+      let sz = size_of_name (value_name t) in
+      if List.length c * w4 <> sz then
+        fail
+          ("the edge walk flattened " ^ show_lt t ^ " to "
+          ^ string_of_int (List.length c) ^ " word(s), but the layout gives it "
+          ^ string_of_int sz ^ " bytes")
+      else begin
+        if List.length c > 1 then incr edge_flattened;
+        c
+      end
+  | P_leaf _ -> []
+
+(* A row is the cell's fields in order, so an array field covers the words the fields before it
+   did not: `text` is { len; code[MAX_WORD] }, and the count of codes is the cell's width minus
+   the length word rather than a number any declaration states.  An element type whose classes do
+   not DIVIDE the remaining words is a refusal, because the alternative is a table that stops
+   short of the cell and a collector that never scans its last words. *)
+let edge_row p width positions =
+  let rec go consumed = function
+    | [] -> []
+    | P_leaf elem :: rest ->
+        let per = edge_classes_of p (P_lt elem) in
+        let left = width - consumed in
+        let per_words = List.length per in
+        if left <= 0 || left mod per_words <> 0 then
+          fail
+            ("the leaf cell " ^ p.p_elem ^ " leaves " ^ string_of_int left
+            ^ " word(s) for elements of " ^ string_of_int per_words
+            ^ " (" ^ show_lt elem ^ "): the array the struct declares does not fill the cell \
+               the layout sized")
+        else
+          let groups = List.init (left / per_words) (fun _ -> per) in
+          List.flatten groups @ go width rest
+    | pos :: rest ->
+        let c = edge_classes_of p pos in
+        c @ go (consumed + List.length c) rest
+  in
+  go 0 positions
+
+(* The tables in the order the pools are declared, so the header reads top-down: capacity,
+   runtime, edges — three sections about one object.  Only SIZED pools get one, which is
+   §6.6's rule applied to §6.7's instrument: an undefined array has no cell to describe, and
+   the report says which pools that left out rather than the table section silently agreeing
+   to be shorter.  Rows are padded to the cell's width with UNUSED, which is what makes
+   reading past a constructor's arity a class instead of an accident; a row WIDER than the
+   cell is a refusal, because the only way that happens is the recorded positions and the
+   emitted struct disagreeing, and the alternative is a table that drops an edge — i.e. a live
+   cell the collector frees. *)
+let edge_tables () =
+  List.map
+    (fun p ->
+      let s = pool_stem p in
+      let sh =
+        match Hashtbl.find_opt shapes s with
+        | Some sh -> sh
+        | None ->
+            fail
+              ("pool " ^ p.p_arr
+              ^ " carries no recorded cell shape, so §6.7's reachability rule cannot be\n\
+                 \   derived for it: every rule that registers a pool records its rows in\n\
+                 \   the same breath, so an unshaped pool is a pool that grew elsewhere")
+      in
+      if sh.s_elem <> p.p_elem then
+        fail
+          ("pool " ^ p.p_arr ^ " was registered with cell " ^ p.p_elem
+          ^ " but the recorded shape names " ^ sh.s_elem);
+      let width = edge_cell_words p.p_elem in
+      let rows =
+        List.map
+          (fun r ->
+            let c = edge_row p width r.r_pos in
+            if List.length c > width then
+              fail
+                ("row " ^ r.r_label ^ " of pool " ^ p.p_arr ^ " flattens to "
+                ^ string_of_int (List.length c)
+                ^ " words inside a cell of " ^ string_of_int width)
+            else if not sh.s_tagged && List.length c <> width then
+              fail
+                ("the untagged cell " ^ p.p_arr ^ " describes "
+                ^ string_of_int (List.length c) ^ " of its "
+                ^ string_of_int width
+                ^ " words.  Only a constructor row may be shorter than its cell, because\n\
+                 \   padding is that row's arity; padding a cell's own row would hide a field\n\
+                 \   this reading never walked")
+            else (r.r_label, c @ List.init (width - List.length c) (fun _ -> E_unused)))
+          sh.s_rows
+      in
+      (p, sh, width, rows))
+    (sized_pools ())
+
+(* Declarations in the header, definitions in the runtime's translation unit: the same split
+   §6.6 used, because a table the collector reads at run time is a runtime object.  The row
+   width and the row count are MACROS rather than literals in the array dimension, so the
+   gate can re-derive them from the emitted text and compare against the typedef below, which
+   is the compiler's own answer to "does this row cover the cell exactly?". *)
+let edge_decl p sh width rows =
+  let s = pool_stem p in
+  let u = String.uppercase_ascii s in
+  let rows_n = List.length rows in
+  let leaf_row =
+    match rows with
+    | [ (_, c) ] -> List.for_all (fun x -> x = E_scalar) c
+    | _ -> false
+  in
+  let gloss =
+    if sh.s_tagged then
+      "one row per constructor, in the artifact's declaration order"
+    else if leaf_row then
+      "the cell is a LEAF: every word is a value, so its scan copies it and follows nothing"
+    else "a cons cell: the element inline in the cell, then the tail"
+  in
+  String.concat ""
+    [
+      Printf.sprintf "/* %s: %d row%s x %d word%s per %s — %s */\n" s rows_n
+        (if rows_n = 1 then "" else "s") width (if width = 1 then "" else "s") sh.s_elem
+        gloss;
+      Printf.sprintf "#define JPL_%s_NPOS %du    /* words per cell */\n" u width;
+      Printf.sprintf
+        "#define JPL_%s_NROWS %du   /* rows: %s */\n" u rows_n
+        (if sh.s_tagged then "constructors" else "1, an untagged cell");
+      Printf.sprintf "#define JPL_%s_NEDGE (JPL_%s_NROWS * JPL_%s_NPOS)\n" u u u;
+      Printf.sprintf "extern const jpl_nat jpl_%s_edge[JPL_%s_NEDGE];\n" s u;
+      Printf.sprintf
+        "typedef char jpl_check_%s_edge_covers_the_cell[((JPL_%s_NPOS * %du) == sizeof (%s)) ? 1 : -1];\n\n"
+        s u w4 sh.s_elem;
+    ]
+
+(* One row per line-group of six words, with the constructor or cell labelled above it: the
+   label is a comment, so what a reader trusts is the entry, not the label — but a label that
+   matches the `.mli`'s own constructor names is what makes a wrong table visible in review. *)
+let edge_chunk n l =
+  let rec go k acc rest =
+    match (k, rest) with
+    | 0, _ | _, [] -> (List.rev acc, rest)
+    | _, x :: xs -> go (k - 1) (x :: acc) xs
+  in
+  go n [] l
+
+let edge_definition s rows =
+  let body =
+    List.map
+      (fun (label, c) ->
+        let items = List.map edge_class_macro c in
+        let rec go l =
+          match l with
+          | [] -> []
+          | _ ->
+              let a, b = edge_chunk 6 l in
+              String.concat ", " a :: go b
+        in
+        "  /* " ^ label ^ " */\n  "
+        ^ String.concat "\n  " (List.map (fun x -> x ^ ",") (go items)) ^ "\n")
+      rows
+  in
+  String.concat ""
+    [
+      Printf.sprintf "const jpl_nat jpl_%s_edge[JPL_%s_NEDGE] = {\n" s
+        (String.uppercase_ascii s);
+      String.concat "" body;
+      "};\n\n";
+    ]
+
+(* One class-defining block, then one declaration and one definition per pool.  The ids come
+   from the registry, so a number typed wrong here fails a check typedef somewhere else rather
+   than becoming a table that points at nothing. *)
+let edge_section () =
+  let ids = edge_pool_ids () in
+  let tables = edge_tables () in
+  let unsized = List.filter (fun p -> p.p_count = None) (List.rev !pools) in
+  emit edges_b "/* ── the pool edge tables (JPL.md §6.7, 5-B.3b-ii-b-2a): what each WORD of a\n\
+                \   pool cell means, so a collector's reachability rule is read from a table\n\
+                \   the layout derived rather than invented by a body.  R7's slots are one\n\
+                \   uint32_t each and cannot tell a handle from a count; this is the second\n\
+                \   reading of the same declarations that says which is which — one class per\n\
+                \   word, because R3 keeps a list's element inline, so a pair cell's element\n\
+                \   is two words and no second table is needed to say how a field splits.  A\n\
+                \   by-value aggregate whose words mean something only under a tag (an option,\n\
+                \   a fat variant) has NO reading here: the emitter refuses one rather than\n\
+                \   guessing which words are live.  Declarations here, definitions in\n\
+                \   sh_run_jpl_pools.c with the runtime they serve, and every row width pinned\n\
+                \   against its cell's sizeof by the typedef under it. ── */\n";
+  emit edges_b "#define JPL_EDGE_SCALAR 0u   /* a value: nothing to forward */\n\
+                #define JPL_EDGE_UNUSED 1u   /* past this row's arity: a word never written */\n";
+  List.iter
+    (fun (stem, id) ->
+      emit edges_b "#define JPL_EDGE_TO_%s_POOL %du   /* target: jpl_%s_pool */\n"
+        (String.uppercase_ascii stem) id stem)
+    (Hashtbl.to_seq ids |> List.of_seq |> List.sort (fun (a, _) (b, _) -> String.compare a b));
+  emit edges_b "#define JPL_EDGE_POOL_COUNT %du   /* targets an edge may name */\n\n"
+    (Hashtbl.length ids);
+  edge_census := [];
+  List.iter
+    (fun (p, sh, width, rows) ->
+      Buffer.add_string edges_b (edge_decl p sh width rows);
+      Buffer.add_string edge_defs_b (edge_definition (pool_stem p) rows);
+      let sc, un, ed =
+        List.fold_left
+          (fun (a, b, c) (_, words) ->
+            List.fold_left
+              (fun (a, b, c) e ->
+                match e with
+                | E_scalar -> (a + 1, b, c)
+                | E_unused -> (a, b + 1, c)
+                | E_edge _ -> (a, b, c + 1))
+              (a, b, c) words)
+          (0, 0, 0) rows
+      in
+      edge_census :=
+        (pool_stem p, sh.s_elem, List.length rows, width, sc, un, ed) :: !edge_census)
+    tables;
+  if unsized <> [] then begin
+    emit edges_b "/* NO EDGE TABLE for: ";
+    List.iter (fun p -> emit edges_b "%s " p.p_arr) unsized;
+    emit edges_b "— an unsized pool is neither defined nor handed out (§6.6), so it has no\n\
+                  \   cell for a row to describe.  The report counts them; the gate asserts\n\
+                  \   tables == pools_with_capacity, which is this sentence in a number. */\n\n"
+  end
+
+let pool_definition p =
+  let s = pool_stem p in
+  let m = pool_macro p in
+  String.concat ""
+    [
+      Printf.sprintf "/* ── %s: %s cells of %s, handled as %s ── */\n" s m p.p_elem
+        p.p_handle;
+      Printf.sprintf "%s %s[%s];\n" p.p_elem p.p_arr m;
+      Printf.sprintf "jpl_ref jpl_%s_next = 1u;   /* index 0 is JPL_NIL and stays\
+                      \ reserved (§6.6) */\n"
+        s;
+      Printf.sprintf "jpl_ref jpl_%s_peak = 0u;\n" s;
+      Printf.sprintf "jpl_ref jpl_%s_taken = 0u;\n" s;
+      Printf.sprintf "jpl_ref jpl_%s_refused = 0u;\n\n" s;
+      Printf.sprintf "%s jpl_%s_alloc(void) {\n  %s h = JPL_NIL;\n" p.p_handle s p.p_handle;
+      Printf.sprintf "  if (jpl_%s_next < %s) {\n    h = jpl_%s_next;\n" s m s;
+      Printf.sprintf "    jpl_%s_next = jpl_%s_next + 1u;\n" s s;
+      Printf.sprintf "    if (jpl_%s_peak < h) {\n      jpl_%s_peak = h;\n    }\n" s s;
+      Printf.sprintf "    if (jpl_%s_taken < JPL_REF_TOP) {\n      jpl_%s_taken = jpl_%s_taken + 1u;\n    }\n" s s s;
+      "  } else {\n";
+      Printf.sprintf "    if (jpl_%s_refused < JPL_REF_TOP) {\n      jpl_%s_refused = jpl_%s_refused + 1u;\n    }\n" s s s;
+      "  }\n  return h;\n}\n\n";
+      Printf.sprintf "jpl_ref jpl_%s_reset(void) {\n" s;
+      "  /* next >= 1u by construction, so this subtraction cannot wrap. */\n";
+      Printf.sprintf "  jpl_ref returned = jpl_%s_next - 1u;\n  jpl_%s_next = 1u;\n" s s;
+      "  return returned;\n}\n\n";
+      Printf.sprintf "jpl_bool jpl_%s_is_live(jpl_ref h) {\n  jpl_bool r = JPL_FALSE;\n" s;
+      Printf.sprintf "  if ((h != JPL_NIL) && (h < jpl_%s_next)) {\n    r = JPL_TRUE;\n" s;
+      "  }\n  return r;\n}\n\n";
+    ]
+
+let pools_c_text ml mli =
+  let b = Buffer.create 8192 in
+  emit b "/* GENERATED by verify/c/jpl_emit.ml from\n\
+          \   %s\n\
+          \   %s\n\
+          \   DO NOT EDIT — the gate re-runs the emitter and byte-compares this file.\n\
+          \   sh_run_jpl_pools.c — the pool DEFINITIONS and the JPL.md §6.6 runtime: the\n\
+          \   only C in this tree that owns a mutable static, and the reason a handle in\n\
+          \   sh_run_jpl.h points at something rather than at a comment.  No number below\n\
+          \   is typed: every dimension is the header's own JPL_POOL_* macro. */\n\n\
+          #include \"sh_run_jpl.h\"\n\n" ml mli;
+  List.iter (fun p -> Buffer.add_string b (pool_definition p)) (sized_pools ());
+  emit b "/* ── §6.7's edge tables: one row per constructor (or per untagged cell), one class\n\
+          \   per word of the cell, in the cell's own field order.  The dimension is the\n\
+          \   header's own JPL_<stem>_NEDGE and the width under it is pinned to the cell's\n\
+          \   sizeof by jpl_check_<stem>_edge_covers_the_cell, so a table's length is a\n\
+          \   property of the cell it describes rather than of how many entries were typed.\n\
+          \   Every entry names its class; no bare number appears in a row. ── */\n";
+  Buffer.add_string b (Buffer.contents edge_defs_b);
+  let unsized = List.filter (fun p -> p.p_count = None) (List.rev !pools) in
+  if unsized <> [] then begin
+    emit b "/* UNDEFINED POOLS — declared by the layout, sized by nothing, so they\n\
+            \   get neither a definition here nor an allocator (§6.6):\n";
+    List.iter (fun p -> emit b "     %s\n" p.p_arr) unsized;
+    emit b "*/\n\n"
+  end;
+  emit b "/* One saturating sum, so a breach has one readable place (§4.2).  Static on\n\
+          \   purpose: the only exported names are the per-pool ones the header declares. */\n\
+          static jpl_nat jpl_pools_add_saturating(jpl_nat a, jpl_nat b) {\n\
+          \  jpl_nat r = a;\n\
+          \  if (r > (JPL_REF_TOP - b)) {\n\
+          \    r = JPL_REF_TOP;\n\
+          \  } else {\n\
+          \    r = r + b;\n\
+          \  }\n\
+          \  return r;\n\
+          }\n\n\
+          jpl_nat jpl_pools_refusals(void) {\n\
+          \  jpl_nat r = 0u;\n";
+  List.iter
+    (fun p -> emit b "  r = jpl_pools_add_saturating(r, jpl_%s_refused);\n" (pool_stem p))
+    (sized_pools ());
+  emit b "  return r;\n}\n";
+  Buffer.contents b
 
 let header_text ml mli =
   let b = Buffer.create 16384 in
@@ -600,7 +1224,9 @@ let header_text ml mli =
   \   JPL.md §6 is the normative contract; §9.2 decision 3 is why a recursive type\n\
   \   is a handle into a static pool and never an inline array.  This is the TYPE\n\
   \   LAYER only: no function body is emitted here, and JPL.5-B.3 owns the\n\
-  \   lowering into it.\n\
+  \   lowering into it.  The pool runtime below (JPL.md §6.6) is declarations only\n\
+  \   as well: the pool arrays themselves and the allocator bodies are in the\n\
+  \   generated translation unit sh_run_jpl_pools.c, which includes this header.\n\
   \n\
   \   Three choices are NOT derived from the artifact, and layout.txt numbers them:\n\
   \   which declared types are pooled, which cap sizes which list pool, and the\n\
@@ -615,6 +1241,8 @@ let header_text ml mli =
   Buffer.add_string b (Buffer.contents types_b);
   Buffer.add_string b "\n";
   Buffer.add_string b (Buffer.contents pools_b);
+  Buffer.add_string b (Buffer.contents runtime_b);
+  Buffer.add_string b (Buffer.contents edges_b);
   emit b "\n/* ── prototypes for the shipped closure: parameter names are the artifact's\n\
   \   own, and every type comes from the .mli signature mapped by the rule set. */\n";
   Buffer.add_string b (Buffer.contents protos_b);
@@ -623,10 +1251,9 @@ let header_text ml mli =
 
 (* ────────────── 7. prototypes, constants, and what is PENDING ───────────── *)
 
-let c_fn n = "jpl_" ^ String.map (fun ch -> if ch = '.' then '_' else ch) n
-
-let c_upper n =
-  String.uppercase_ascii (String.map (fun ch -> if ch = '.' then '_' else ch) n)
+(* `c_fn` and `c_upper` are the SHARED reader's naming rules now (jpl_ast.ml §9), the same
+   ones the census's ABI renders prototypes through: two header layers compiled as one
+   translation unit cannot own two spellings of one symbol. *)
 
 (* How many closure bindings call this one: the measurement that turns "needs a
    monomorphization" from an assertion into a number. *)
@@ -635,13 +1262,11 @@ let callers_of n =
     (fun _ m acc -> if Hashtbl.mem m.edges n then acc + 1 else acc)
     closure 0
 
-(* The cap bindings are folded once into the JPL_MAX_* macros above; re-emitting
-   them as JPL_C_* would be a second name for one number. *)
-let cap_bindings =
-  [ ("mAX_WIDTH", "JPL_MAX_WIDTH"); ("mAX_WORD", "JPL_MAX_WORD");
-    ("mAX_ARGV", "JPL_MAX_ARGV"); ("mAX_ENV", "JPL_MAX_ENV");
-    ("mAX_LIST", "JPL_MAX_LIST"); ("gLOB_FUEL", "JPL_GLOB_FUEL");
-    ("mAX_FUEL", "JPL_MAX_FUEL") ]
+(* The cap bindings are folded once into the JPL_MAX_* macros above; re-emitting them as
+   JPL_C_* would be a second name for one number.  WHICH ones they are is derived from the
+   artifact's own cap table (`cap_macro_of_data`, in the reader), not from a list typed
+   here: 5-B.3a's census asks the same question of the same ten names, and a hand-written
+   copy in this file would be a second model of a fact the extraction already carries. *)
 
 let emit_prototypes members =
   let nf = ref 0 and nv = ref 0 and np = ref 0 in
@@ -669,7 +1294,7 @@ let emit_prototypes members =
              an initialiser, which is the lowering's business, not this layer's *)
           match try_fold (Hashtbl.find binds nm).b_body with
           | Some v ->
-              (match List.assoc_opt nm cap_bindings with
+              (match cap_macro_of_data nm with
                | Some macro ->
                    emit protos_b
                      "/* %s : %s = %d is already defined above as %s — one number, one\n\
@@ -802,6 +1427,135 @@ let report ml mli members vocabulary nf nv np =
       Printf.printf "     The model must fix one number in that range and prove it.  Nothing\n";
       Printf.printf "     in the header allocates against a guess.\n\n")
     (List.rev !unsized);
+  section "POOL RUNTIME (JPL.md §6.6): one bounded region per sized pool";
+  let ps = sized_pools () in
+  let unsized = List.filter (fun p -> p.p_count = None) (List.rev !pools) in
+  Printf.printf "  %-22s %-26s %-30s %-26s %s\n" "stem" "capacity macro" "cells of"
+    "handled as" "runtime names";
+  List.iter
+    (fun p ->
+      Printf.printf "  %-22s %-26s %-30s %-26s _alloc, _reset, _is_live, _next, _peak,\
+                    \ _taken, _refused\n"
+        (pool_stem p) (pool_macro p) p.p_elem p.p_handle)
+    ps;
+  if unsized <> [] then
+    Printf.printf "  NO RUNTIME for: %s — unsized pools can be neither defined nor handed\
+                   \ out,\n   which is §6.6's rule cutting both ways.\n"
+      (String.concat ", " (List.map (fun p -> p.p_arr) unsized));
+  Printf.printf "\n  Reclamation is at REGION granularity: a reset returns every cell at once,\n\
+    \  because a per-cell free needs the reachability rule §6.5's ii-b-2 owns before it is\n\
+    \  safe, not a function.  A reset does not clear cells, and `is_live` is the guard rail\n\
+    \  that makes a handle carried across one observable (§6.6).  `peak` is the quantity\n\
+    \  decision 4 said no walk over the artifact's text could produce — a run measures it.\n\
+    \  With no kernel that allocates yet, every peak in this tree is 0: this is the\n\
+    \  instrument, not the number, and the gate prints that zero as one.\n";
+  section "RUNTIME SUMMARY (the keys verify/c/jpl_emit.sh asserts — a missing key is a failure)";
+  let n = List.length ps in
+  let cells =
+    List.fold_left
+      (fun a p -> match p.p_count with Some v -> a + v | None -> a)
+      0 (List.rev !pools)
+  in
+  let bytes =
+    List.fold_left
+      (fun a p -> match p.p_count with Some v -> a + v * size_of_name p.p_elem | None -> a)
+      0 (List.rev !pools)
+  in
+  let rt_names = runtime_names () in
+  let closure_names = List.map c_fn members in
+  let collide =
+    List.filter (fun x -> List.mem x closure_names) rt_names
+  in
+  let handles_ok =
+    List.length (List.filter (fun p -> Hashtbl.mem rows p.p_handle) ps)
+  in
+  List.iter
+    (fun (k, v, gloss) -> Printf.printf "  %-40s %8d   %s\n" k v gloss)
+    [
+      ("pools_declared", List.length !pools, "arrays the layout section declares");
+      ("pools_with_capacity", n, "the ones sized from the cap table");
+      ("pools_without_capacity", List.length unsized, "sized by nothing, so runtime-free");
+      ("allocators_emitted", n, "one jpl_<stem>_alloc per sized pool");
+      ("resets_emitted", n, "one jpl_<stem>_reset per sized pool");
+      ("live_checks_emitted", n, "one jpl_<stem>_is_live per sized pool");
+      ("counters_emitted", 4 * n, "next, peak, taken, refused per sized pool");
+      ("pool_arrays_defined", n, "arrays the generated translation unit defines");
+      ("refusals_sum_terms", n, "terms in jpl_pools_refusals's saturating sum");
+      ("allocator_handles_defined_in_layout", handles_ok, "an allocator's return type is a typedef the layout emitted");
+      ("runtime_names_colliding_with_prototypes", List.length collide, "a runtime name that is also a closure symbol — must be 0");
+      ("runtime_cells_total", cells, "cells across every sized pool");
+      ("runtime_bytes_total", bytes, "bytes of static storage the pools occupy");
+    ];
+  if n = 0 then begin
+    Printf.printf "RUNTIME REFUSED: %d sized pools, so the runtime would be an empty file.\n"
+      n;
+    exit 1
+  end;
+  if collide <> [] then begin
+    Printf.printf "RUNTIME REFUSED: the generated names %s collide with closure prototypes.\n"
+      (String.concat ", " collide);
+    Printf.printf "   Two definitions of one symbol in one translation unit is not a style\n\
+      \   point, and §6.3's ABI and §6.6's runtime share the namespace.\n";
+    exit 1
+  end;
+  if handles_ok <> n then begin
+    Printf.printf "RUNTIME REFUSED: %d of %d allocators return a handle the layout never\
+                   \ typedef'd.\n"
+      (n - handles_ok) n;
+    exit 1
+  end;
+  Printf.printf "\nRUNTIME EMITTED: %d pools, %d cells, %s of static storage, one bounded\
+                 \ region each.\n"
+    n cells (kb bytes);
+  section "EDGE TABLES (JPL.md §6.7, 5-B.3b-ii-b-2a): one class per WORD of every sized pool";
+  let cs = List.rev !edge_census in
+  Printf.printf "  %-22s %-30s %5s %6s %8s %8s %8s\n" "stem" "cell" "rows"
+    "words" "scalar" "unused" "edges";
+  List.iter
+    (fun (s, elem, rows, width, sc, un, ed) ->
+      Printf.printf "  %-22s %-30s %5d %6d %8d %8d %8d\n" s elem rows width sc un ed)
+    cs;
+  let e_rows = List.fold_left (fun a (_, _, r, _, _, _, _) -> a + r) 0 cs in
+  let sum f = List.fold_left (fun a c -> a + f c) 0 cs in
+  let e_entries = sum (fun (_, _, r, w, _, _, _) -> r * w) in
+  let e_scalars = sum (fun (_, _, _, _, s, _, _) -> s) in
+  let e_unuseds = sum (fun (_, _, _, _, _, u, _) -> u) in
+  let e_edges = sum (fun (_, _, _, _, _, _, d) -> d) in
+  Printf.printf "\n  %d tables, %d rows, %d classes, and the three of them partition the\n\
+    \  table exactly: %d scalar + %d unused + %d edges = %d.\n\
+    \  %d position(s) flattened a by-value aggregate into its leaf words — the sites where a\n\
+    \  pooled cell holds an inline pair, which is why the table is per word and not per field\n\
+    \  (§6.7).  A per-field table would have needed a second table saying how the field\n\
+    \  splits; this one pins its own width against the cell's sizeof in the header instead.\n\
+    \  An edge may name %d target pools — every pool this header declares.\n"
+    (List.length cs) e_rows e_entries e_scalars e_unuseds e_edges e_entries
+    !edge_flattened (List.length cs);
+  section "EDGE SUMMARY (the keys verify/c/jpl_emit.sh asserts — a missing key is a failure)";
+  List.iter
+    (fun (k, v, gloss) -> Printf.printf "  %-40s %8d   %s\n" k v gloss)
+    [
+      ("edge_tables_emitted", List.length cs, "one jpl_<stem>_edge per sized pool");
+      ("edge_rows_derived", e_rows, "constructors, plus one row per untagged cell");
+      ("edge_entries_derived", e_entries, "classes across every table = rows x words per cell");
+      ("edge_class_scalars", e_scalars, "words holding a value: nothing to forward");
+      ("edge_class_unuseds", e_unuseds, "words past a constructor's arity: never written");
+      ("edge_class_edges", e_edges, "words holding a handle: what evacuation must copy");
+      ("edge_target_pools", List.length cs, "pools an edge may name, from the registry");
+      ("edge_aggregates_flattened", !edge_flattened, "positions whose type is inline by value");
+      ("edge_width_checks_emitted", List.length cs, "jpl_check_<stem>_edge_covers_the_cell typedefs");
+      ("edge_class_partition_residual", e_entries - (e_scalars + e_unuseds + e_edges), "must be 0: the classes are a partition");
+    ];
+  if cs = [] then begin
+    Printf.printf "EDGE REFUSED: %d sized pools produced no table.\n" (List.length cs);
+    exit 1
+  end;
+  if e_entries <> e_scalars + e_unuseds + e_edges then begin
+    Printf.printf "EDGE REFUSED: %d entries split into %d + %d + %d.\n" e_entries e_scalars
+      e_unuseds e_edges;
+    Printf.printf "   A word with no class is a live cell a collector frees, and the only\n\
+      \   honest reading of a mismatch is that the walk stopped early.\n";
+    exit 1
+  end;
   section "THE THREE NON-DERIVED CHOICES";
   Printf.printf "  1. pooled types            %s — from sh_jpl.v §1's cap comments, each with\n"
     (String.concat ", " pooled_types);
@@ -832,7 +1586,7 @@ let report ml mli members vocabulary nf nv np =
 
 (* ───────────────────────────── 9. main ──────────────────────────────────── *)
 
-let main ml mli out_h roots =
+let main ml mli out_h out_c roots =
   let items = Parse.implementation (Lexing.from_channel (open_in ml)) in
   add_struct "" items;
   add_sig (Parse.interface (Lexing.from_channel (open_in mli)));
@@ -869,14 +1623,20 @@ let main ml mli out_h roots =
       ^ String.concat ", " extra);
   caps_section ();
   pools_section ();
+  runtime_section ();
+  edge_section ();
   family_check ();
   let oc = open_out out_h in
   output_string oc (header_text ml mli);
   close_out oc;
+  let oc2 = open_out out_c in
+  output_string oc2 (pools_c_text ml mli);
+  close_out oc2;
   report ml mli members needed nf nv np
 
 let () =
   match List.tl (Array.to_list Sys.argv) with
-  | [ ml; mli; out_h ] -> main ml mli out_h default_roots
-  | [ ml; mli; out_h; rs ] -> main ml mli out_h (split_commas rs)
-  | _ -> fail "usage: jpl_emit <ml> <mli> <out.h> [comma-separated-roots]"
+  | [ ml; mli; out_h; out_c ] -> main ml mli out_h out_c default_roots
+  | [ ml; mli; out_h; out_c; rs ] -> main ml mli out_h out_c (split_commas rs)
+  | _ ->
+      fail "usage: jpl_emit <ml> <mli> <out.h> <out.c> [comma-separated-roots]"

@@ -682,6 +682,23 @@ let show_lt t = tn t
    agreeing. *)
 let value_name t = match t with L_word -> "jpl_wref" | _ -> "jpl_" ^ tn t
 
+(* The C NAME of a function and of a data constant, in the same place as the name of a
+   type.  Two header layers are built from these rules — the representation layer's
+   prototypes and the census's ABI — and the gate compiles them together, so a symbol
+   spelled differently in the two would be a link error JPL.7 pays for.  Extraction
+   lower-cases the leading letter of a capitalised identifier, which is why an artifact
+   name can contain a `.` or a mixed case that C cannot. *)
+let c_fn n = "jpl_" ^ String.map (fun ch -> if ch = '.' then '_' else ch) n
+
+let c_upper n =
+  String.uppercase_ascii (String.map (fun ch -> if ch = '.' then '_' else ch) n)
+
+(* 5-B.3b-ii: an arity-0 value's C name, given the macro the caps table already carries
+   for it.  A capacity keeps the `JPL_MAX_*` name the header dimensioned its pools with;
+   any other folded constant is `JPL_C_*`.  The caller supplies the former because it is a
+   property of the artifact's cap table, and this is the rule that reads it. *)
+let data_macro ?cap n = match cap with Some m -> m | None -> "JPL_C_" ^ c_upper n
+
 (* A signature's arrow spine, read off the .mli's core_type. *)
 let rec arrow_spine acc (t : core_type) =
   match t.ptyp_desc with
@@ -828,4 +845,24 @@ let c () =
   match !caps_r with
   | Some x -> x
   | None -> fail "capacity used before the cap table was read"
+
+(* The artifact's name for a model-side capacity: Extraction lower-cases the leading
+   letter of a capitalised identifier, so MAX_STACK is exported as mAX_STACK and
+   GLOB_FUEL as gLOB_FUEL.  Both consumers need this — the emitter to avoid naming one
+   number twice, the census to say which macro a rendered body may cite — so it is the
+   reader's rule and not either tool's local knowledge. *)
+let cap_data model_name =
+  let ch = String.get model_name 0 in
+  if ch >= 'A' && ch <= 'Z' then
+    String.make 1 (Char.lowercase_ascii ch)
+    ^ String.sub model_name 1 (String.length model_name - 1)
+  else model_name
+
+let cap_macro_of_data nm =
+  List.find_map
+    (fun (_, macro, model, _) -> if cap_data model = nm then Some macro else None)
+    cap_fields
+
+(* Is this data binding already a capacity the header defines under its own name? *)
+let is_cap_data nm = cap_macro_of_data nm <> None
 

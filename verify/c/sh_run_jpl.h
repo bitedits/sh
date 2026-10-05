@@ -5,7 +5,9 @@
    JPL.md §6 is the normative contract; §9.2 decision 3 is why a recursive type
    is a handle into a static pool and never an inline array.  This is the TYPE
    LAYER only: no function body is emitted here, and JPL.5-B.3 owns the
-   lowering into it.
+   lowering into it.  The pool runtime below (JPL.md §6.6) is declarations only
+   as well: the pool arrays themselves and the allocator bodies are in the
+   generated translation unit sh_run_jpl_pools.c, which includes this header.
 
    Three choices are NOT derived from the artifact, and layout.txt numbers them:
    which declared types are pooled, which cap sizes which list pool, and the
@@ -302,6 +304,185 @@ extern jpl_frame_node jpl_frame_pool[JPL_POOL_FRAME];
 
 #define JPL_POOL_FRAME_LIST 16384u   /* from JPL_MAX_STACK, 8192 cells, x headroom 2; the machine stack = frame list */
 extern jpl_frame_list_cell jpl_frame_list_pool[JPL_POOL_FRAME_LIST];
+
+/* ── the pool runtime (JPL.md §6.6, 5-B.3b-ii-b-1): one bounded region per
+   pool above.  Declarations only — the definitions and bodies are in the
+   generated translation unit sh_run_jpl_pools.c, which includes this header,
+   and that file is the only C in this tree holding a mutable static.  Index 0
+   is JPL_NIL and is never handed out, so a pool of C cells serves C-1.
+   Reclamation is at region granularity because a per-cell free needs the
+   reachability rule §6.5's ii-b-2 owns before it is safe, not a function; a
+   reset does NOT clear cells, since clearing them at every step boundary would
+   price the step by the pool rather than by the data and no lemma requires the
+   bytes to be zero.  is_live is the guard rail that makes a handle carried
+   across a reset observable — not a liveness analysis. */
+#define JPL_REF_TOP 4294967295u   /* counters saturate here, never wrap (§4.2) */
+typedef char jpl_check_ref_top_is_the_handle_word[((sizeof (jpl_ref) == 4u) ? 1 : -1)];
+
+/* word: jpl_word_pool of JPL_POOL_WORD cells of jpl_text, handled as jpl_wref */
+extern jpl_ref jpl_word_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_word_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_word_taken;    /* cells served since the program started */
+extern jpl_ref jpl_word_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_word_capacity_fits_the_counter[((JPL_POOL_WORD < JPL_REF_TOP) ? 1 : -1)];
+jpl_wref jpl_word_alloc(void);   /* JPL_NIL once the region of JPL_POOL_WORD cells is full */
+jpl_ref jpl_word_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_word_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* pair_text_text_list: jpl_pair_text_text_list_pool of JPL_POOL_PAIR_TEXT_TEXT_LIST cells of jpl_pair_text_text_list_cell, handled as jpl_pair_text_text_list */
+extern jpl_ref jpl_pair_text_text_list_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_pair_text_text_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_pair_text_text_list_taken;    /* cells served since the program started */
+extern jpl_ref jpl_pair_text_text_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_pair_text_text_list_capacity_fits_the_counter[((JPL_POOL_PAIR_TEXT_TEXT_LIST < JPL_REF_TOP) ? 1 : -1)];
+jpl_pair_text_text_list jpl_pair_text_text_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_PAIR_TEXT_TEXT_LIST cells is full */
+jpl_ref jpl_pair_text_text_list_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_pair_text_text_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* cmd: jpl_cmd_pool of JPL_POOL_CMD cells of jpl_cmd_node, handled as jpl_cmd */
+extern jpl_ref jpl_cmd_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_cmd_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_cmd_taken;    /* cells served since the program started */
+extern jpl_ref jpl_cmd_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_cmd_capacity_fits_the_counter[((JPL_POOL_CMD < JPL_REF_TOP) ? 1 : -1)];
+jpl_cmd jpl_cmd_alloc(void);   /* JPL_NIL once the region of JPL_POOL_CMD cells is full */
+jpl_ref jpl_cmd_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_cmd_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* text_list: jpl_text_list_pool of JPL_POOL_TEXT_LIST cells of jpl_text_list_cell, handled as jpl_text_list */
+extern jpl_ref jpl_text_list_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_text_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_text_list_taken;    /* cells served since the program started */
+extern jpl_ref jpl_text_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_text_list_capacity_fits_the_counter[((JPL_POOL_TEXT_LIST < JPL_REF_TOP) ? 1 : -1)];
+jpl_text_list jpl_text_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_TEXT_LIST cells is full */
+jpl_ref jpl_text_list_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_text_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* cmd_list: jpl_cmd_list_pool of JPL_POOL_CMD_LIST cells of jpl_cmd_list_cell, handled as jpl_cmd_list */
+extern jpl_ref jpl_cmd_list_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_cmd_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_cmd_list_taken;    /* cells served since the program started */
+extern jpl_ref jpl_cmd_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_cmd_list_capacity_fits_the_counter[((JPL_POOL_CMD_LIST < JPL_REF_TOP) ? 1 : -1)];
+jpl_cmd_list jpl_cmd_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_CMD_LIST cells is full */
+jpl_ref jpl_cmd_list_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_cmd_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* pair_text_list_cmd_list_list: jpl_pair_text_list_cmd_list_list_pool of JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST cells of jpl_pair_text_list_cmd_list_list_cell, handled as jpl_pair_text_list_cmd_list_list */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_taken;    /* cells served since the program started */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_pair_text_list_cmd_list_list_capacity_fits_the_counter[((JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST < JPL_REF_TOP) ? 1 : -1)];
+jpl_pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST cells is full */
+jpl_ref jpl_pair_text_list_cmd_list_list_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_pair_text_list_cmd_list_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* frame: jpl_frame_pool of JPL_POOL_FRAME cells of jpl_frame_node, handled as jpl_frame */
+extern jpl_ref jpl_frame_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_frame_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_frame_taken;    /* cells served since the program started */
+extern jpl_ref jpl_frame_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_frame_capacity_fits_the_counter[((JPL_POOL_FRAME < JPL_REF_TOP) ? 1 : -1)];
+jpl_frame jpl_frame_alloc(void);   /* JPL_NIL once the region of JPL_POOL_FRAME cells is full */
+jpl_ref jpl_frame_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_frame_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* frame_list: jpl_frame_list_pool of JPL_POOL_FRAME_LIST cells of jpl_frame_list_cell, handled as jpl_frame_list */
+extern jpl_ref jpl_frame_list_next;     /* lowest index never handed out; 1u is an empty region */
+extern jpl_ref jpl_frame_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+extern jpl_ref jpl_frame_list_taken;    /* cells served since the program started */
+extern jpl_ref jpl_frame_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+typedef char jpl_check_frame_list_capacity_fits_the_counter[((JPL_POOL_FRAME_LIST < JPL_REF_TOP) ? 1 : -1)];
+jpl_frame_list jpl_frame_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_FRAME_LIST cells is full */
+jpl_ref jpl_frame_list_reset(void);   /* cells returned; next goes back to 1u */
+jpl_bool jpl_frame_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+
+/* §4.2 wants one observable place: the saturating sum of every pool's refusals.
+   A lowering reads a nil handle as the same edge a fired branch_guardb is
+   (§5), and the host reads this as the run's verdict. */
+jpl_nat jpl_pools_refusals(void);
+
+/* ── the pool edge tables (JPL.md §6.7, 5-B.3b-ii-b-2a): what each WORD of a
+   pool cell means, so a collector's reachability rule is read from a table
+   the layout derived rather than invented by a body.  R7's slots are one
+   uint32_t each and cannot tell a handle from a count; this is the second
+   reading of the same declarations that says which is which — one class per
+   word, because R3 keeps a list's element inline, so a pair cell's element
+   is two words and no second table is needed to say how a field splits.  A
+   by-value aggregate whose words mean something only under a tag (an option,
+   a fat variant) has NO reading here: the emitter refuses one rather than
+   guessing which words are live.  Declarations here, definitions in
+   sh_run_jpl_pools.c with the runtime they serve, and every row width pinned
+   against its cell's sizeof by the typedef under it. ── */
+#define JPL_EDGE_SCALAR 0u   /* a value: nothing to forward */
+#define JPL_EDGE_UNUSED 1u   /* past this row's arity: a word never written */
+#define JPL_EDGE_TO_CMD_POOL 3u   /* target: jpl_cmd_pool */
+#define JPL_EDGE_TO_CMD_LIST_POOL 4u   /* target: jpl_cmd_list_pool */
+#define JPL_EDGE_TO_FRAME_POOL 5u   /* target: jpl_frame_pool */
+#define JPL_EDGE_TO_FRAME_LIST_POOL 6u   /* target: jpl_frame_list_pool */
+#define JPL_EDGE_TO_PAIR_TEXT_LIST_CMD_LIST_LIST_POOL 7u   /* target: jpl_pair_text_list_cmd_list_list_pool */
+#define JPL_EDGE_TO_PAIR_TEXT_TEXT_LIST_POOL 8u   /* target: jpl_pair_text_text_list_pool */
+#define JPL_EDGE_TO_TEXT_LIST_POOL 9u   /* target: jpl_text_list_pool */
+#define JPL_EDGE_TO_WORD_POOL 10u   /* target: jpl_word_pool */
+#define JPL_EDGE_POOL_COUNT 8u   /* targets an edge may name */
+
+/* word: 1 row x 257 words per jpl_text — the cell is a LEAF: every word is a value, so its scan copies it and follows nothing */
+#define JPL_WORD_NPOS 257u    /* words per cell */
+#define JPL_WORD_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_WORD_NEDGE (JPL_WORD_NROWS * JPL_WORD_NPOS)
+extern const jpl_nat jpl_word_edge[JPL_WORD_NEDGE];
+typedef char jpl_check_word_edge_covers_the_cell[((JPL_WORD_NPOS * 4u) == sizeof (jpl_text)) ? 1 : -1];
+
+/* pair_text_text_list: 1 row x 3 words per jpl_pair_text_text_list_cell — a cons cell: the element inline in the cell, then the tail */
+#define JPL_PAIR_TEXT_TEXT_LIST_NPOS 3u    /* words per cell */
+#define JPL_PAIR_TEXT_TEXT_LIST_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_PAIR_TEXT_TEXT_LIST_NEDGE (JPL_PAIR_TEXT_TEXT_LIST_NROWS * JPL_PAIR_TEXT_TEXT_LIST_NPOS)
+extern const jpl_nat jpl_pair_text_text_list_edge[JPL_PAIR_TEXT_TEXT_LIST_NEDGE];
+typedef char jpl_check_pair_text_text_list_edge_covers_the_cell[((JPL_PAIR_TEXT_TEXT_LIST_NPOS * 4u) == sizeof (jpl_pair_text_text_list_cell)) ? 1 : -1];
+
+/* cmd: 11 rows x 4 words per jpl_cmd_node — one row per constructor, in the artifact's declaration order */
+#define JPL_CMD_NPOS 4u    /* words per cell */
+#define JPL_CMD_NROWS 11u   /* rows: constructors */
+#define JPL_CMD_NEDGE (JPL_CMD_NROWS * JPL_CMD_NPOS)
+extern const jpl_nat jpl_cmd_edge[JPL_CMD_NEDGE];
+typedef char jpl_check_cmd_edge_covers_the_cell[((JPL_CMD_NPOS * 4u) == sizeof (jpl_cmd_node)) ? 1 : -1];
+
+/* text_list: 1 row x 2 words per jpl_text_list_cell — a cons cell: the element inline in the cell, then the tail */
+#define JPL_TEXT_LIST_NPOS 2u    /* words per cell */
+#define JPL_TEXT_LIST_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_TEXT_LIST_NEDGE (JPL_TEXT_LIST_NROWS * JPL_TEXT_LIST_NPOS)
+extern const jpl_nat jpl_text_list_edge[JPL_TEXT_LIST_NEDGE];
+typedef char jpl_check_text_list_edge_covers_the_cell[((JPL_TEXT_LIST_NPOS * 4u) == sizeof (jpl_text_list_cell)) ? 1 : -1];
+
+/* cmd_list: 1 row x 2 words per jpl_cmd_list_cell — a cons cell: the element inline in the cell, then the tail */
+#define JPL_CMD_LIST_NPOS 2u    /* words per cell */
+#define JPL_CMD_LIST_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_CMD_LIST_NEDGE (JPL_CMD_LIST_NROWS * JPL_CMD_LIST_NPOS)
+extern const jpl_nat jpl_cmd_list_edge[JPL_CMD_LIST_NEDGE];
+typedef char jpl_check_cmd_list_edge_covers_the_cell[((JPL_CMD_LIST_NPOS * 4u) == sizeof (jpl_cmd_list_cell)) ? 1 : -1];
+
+/* pair_text_list_cmd_list_list: 1 row x 3 words per jpl_pair_text_list_cmd_list_list_cell — a cons cell: the element inline in the cell, then the tail */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NPOS 3u    /* words per cell */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NEDGE (JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NROWS * JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NPOS)
+extern const jpl_nat jpl_pair_text_list_cmd_list_list_edge[JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NEDGE];
+typedef char jpl_check_pair_text_list_cmd_list_list_edge_covers_the_cell[((JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NPOS * 4u) == sizeof (jpl_pair_text_list_cmd_list_list_cell)) ? 1 : -1];
+
+/* frame: 9 rows x 5 words per jpl_frame_node — one row per constructor, in the artifact's declaration order */
+#define JPL_FRAME_NPOS 5u    /* words per cell */
+#define JPL_FRAME_NROWS 9u   /* rows: constructors */
+#define JPL_FRAME_NEDGE (JPL_FRAME_NROWS * JPL_FRAME_NPOS)
+extern const jpl_nat jpl_frame_edge[JPL_FRAME_NEDGE];
+typedef char jpl_check_frame_edge_covers_the_cell[((JPL_FRAME_NPOS * 4u) == sizeof (jpl_frame_node)) ? 1 : -1];
+
+/* frame_list: 1 row x 2 words per jpl_frame_list_cell — a cons cell: the element inline in the cell, then the tail */
+#define JPL_FRAME_LIST_NPOS 2u    /* words per cell */
+#define JPL_FRAME_LIST_NROWS 1u   /* rows: 1, an untagged cell */
+#define JPL_FRAME_LIST_NEDGE (JPL_FRAME_LIST_NROWS * JPL_FRAME_LIST_NPOS)
+extern const jpl_nat jpl_frame_list_edge[JPL_FRAME_LIST_NEDGE];
+typedef char jpl_check_frame_list_edge_covers_the_cell[((JPL_FRAME_LIST_NPOS * 4u) == sizeof (jpl_frame_list_cell)) ? 1 : -1];
 
 
 /* ── prototypes for the shipped closure: parameter names are the artifact's

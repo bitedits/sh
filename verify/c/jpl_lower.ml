@@ -348,20 +348,9 @@ let is_builtin_ctor = function
   | "[]" | "::" | "Some" | "None" | "true" | "false" | "()" -> true
   | _ -> false
 
-(* The artifact's own capacity DATA bindings: Extraction lower-cases the leading letter
-   of a capitalised identifier, so MAX_STACK is exported as mAX_STACK and GLOB_FUEL as
-   gLOB_FUEL. *)
-let cap_data model_name =
-  let c = String.get model_name 0 in
-  if c >= 'A' && c <= 'Z' then
-    String.make 1 (Char.lowercase_ascii c)
-    ^ String.sub model_name 1 (String.length model_name - 1)
-  else model_name
-
-let cap_macro_of_data nm =
-  List.find_map
-    (fun (_, macro, model, _) -> if cap_data model = nm then Some macro else None)
-    cap_fields
+(* The artifact's capacity DATA bindings and the macro each one already has are the shared
+   reader's rule (`cap_data`, `cap_macro_of_data`, `is_cap_data`), the same one the
+   representation layer applies when it decides whether to name a number twice. *)
 
 (* ─────────────────────── 4. what the census records ─────────────────────── *)
 
@@ -1551,6 +1540,611 @@ let write_abi path rows =
   output_string oc (Buffer.contents b);
   close_out oc
 
+(* ───────── 8c. renderability: can this body be written at all yet? ───────── *)
+
+(* §6.3 decided each binding's SHAPE.  Before a single statement can be written there is a
+   second question, and it has exactly three negatives — does this body need a pool, an
+   allocator, or a function value (JPL.md §6.4)?  This section does not answer it from the
+   outside: THE VERDICT IS THE RENDERER'S OWN TRIAL RESULT.  A census that classified bodies
+   by rules of its own and a renderer that followed different ones would be two models of one
+   artifact, which is the failure §2 forbids — so the census asks the renderer to render, and
+   reports what came back.  "Renderable" therefore means "this file produced C for it", and
+   every refusal is the renderer's own sentence rather than a category the census hoped for.
+
+   What the trial is not left to guess it takes from the sections above: §7's schema class,
+   §6's self-call count, and §8's `pool_of` over the sites §5 recorded and over the binding's
+   own signature.  The rules are tried in dependency order — an operator alias has no
+   definition to write, a folded constant already has a name in 2e's header, a self-call has
+   no statement form until §6.3's rewrite lands, a body that touches a pooled value has no
+   cell until decision 3's copying lands — and only last comes the renderer's own set of
+   refusals, which is the single class that shrinks when this file grows a rule. *)
+
+type verdict =
+  { v_name : string;
+    v_class : string;        (* §7's schema, kept beside the verdict so the two readings meet *)
+    v_verdict : string;
+    v_reason : string;
+    v_def : string;          (* the rendered definition; "" unless the verdict is RENDER *)
+    v_cites : string list;   (* data macros the body cites, so the gate can find each one *)
+    v_calls : string list }  (* bindings it calls, each of which had to render first *)
+
+(* The trial's two escapes.  `Waiting` is what makes this a fixpoint instead of a first
+   guess: a body may be renderable only once what it calls is known to be, and `is_name`
+   over `is_alpha` is exactly that case. *)
+exception Refused of string
+exception Waiting of string
+
+let refuse m = raise (Refused m)
+
+(* §6.4's licensed operators: what the artifact writes, and what C writes.  `=` becomes `==`
+   ONLY because every operand is checked scalar first: a `text` is a word-slab handle,
+   handle equality is not word equality, and structural equality is a binding of its own
+   (`teqb`) for exactly that reason — a renderer that licensed `=` over a `text` would lower
+   the wrong program and the differential sweep would never see it. *)
+let c_infix =
+  [ ("=", "=="); ("<>", "!="); ("<=", "<="); ("<", "<"); (">=", ">="); (">", ">");
+    ("&&", "&&"); ("||", "||"); ("+", "+"); ("-", "-") ]
+
+let c_prefix = [ "not"; "Stdlib.not" ]
+
+(* Names a C definition cannot take, checked rather than assumed: the artifact's binders are
+   the parameter names 2e printed in the prototype this definition has to match, and one that
+   collides with a keyword would be a compile error in the emitted file instead of a
+   measurement here. *)
+let c_keywords =
+  [ "auto"; "break"; "case"; "char"; "const"; "continue"; "default"; "do"; "double";
+    "else"; "enum"; "extern"; "float"; "for"; "goto"; "if"; "inline"; "int"; "long";
+    "register"; "return"; "short"; "signed"; "sizeof"; "static"; "struct"; "switch";
+    "typedef"; "union"; "unsigned"; "void"; "volatile"; "while" ]
+
+(* which layouts the renderer may compute on without touching a cell *)
+let scalar_lt t = match resolve t with L_nat | L_bool | L_unit -> true | _ -> false
+
+(* A DATA binding's C name: the macro the caps table already carries when it has one, the
+   header's own `JPL_C_` spelling when it does not.  Both halves are the shared reader's
+   rule, so 2e's prototype layer and this trial cannot name one number two ways. *)
+let macro_for nm = data_macro nm ?cap:(cap_macro_of_data nm)
+
+let rec render_e scope done_v cites calls (e : expression) : string * lt =
+  match e.pexp_desc with
+  | Pexp_constant { pconst_desc = Pconst_integer (s, None); _ } -> (s ^ "u", L_nat)
+  | Pexp_constant { pconst_desc = c; _ } -> refuse ("a " ^ describe_const c ^ " literal")
+  | Pexp_ident { txt } -> render_name scope done_v cites (li txt)
+  | Pexp_construct ({ txt }, arg) ->
+      (match li txt, arg with
+       | "true", None -> ("1u", L_bool)
+       | "false", None -> ("0u", L_bool)
+       | nm, _ ->
+           refuse (Printf.sprintf "the %s it builds, which is a value with a representation and not a literal"
+                     nm))
+  | Pexp_ifthenelse (cnd, tru, Some fls) ->
+      let cc, ct = render_e scope done_v cites calls cnd in
+      let tc, tt = render_e scope done_v cites calls tru in
+      let fc, ft = render_e scope done_v cites calls fls in
+      if not (scalar_lt ct) then
+        refuse (Printf.sprintf "a condition of type %s, which is not a scalar" (pr_lt ct))
+      else if resolve tt <> resolve ft then
+        refuse (Printf.sprintf "two branches of different layouts (%s and %s)" (pr_lt tt) (pr_lt ft))
+      else ("(" ^ cc ^ " ? " ^ tc ^ " : " ^ fc ^ ")", tt)
+  | Pexp_ifthenelse _ -> refuse "an if without an else, which is a statement and not an expression"
+  | Pexp_apply (f, args) ->
+      (* A numeral the artifact wrote as a unary `succ` chain folds to ONE C constant, which
+         is what makes `is_digit`'s upper bound renderable at all: the shared reader's folder
+         is where that equation lives, and this file does not re-derive it. *)
+      (match try_fold e with
+       | Some v -> (string_of_int v ^ "u", L_nat)
+       | None ->
+         if not (List.for_all (fun (l, _) -> l = Nolabel) args) then refuse "a labelled argument"
+         else
+           let al = List.map snd args in
+           match f.pexp_desc with
+           | Pexp_ident { txt } when List.mem_assoc (li txt) c_infix ->
+               render_infix scope done_v cites calls (li txt) al
+           | Pexp_ident { txt } when List.mem (li txt) c_prefix ->
+               (match al with
+                | [ x ] ->
+                    let a, t = render_e scope done_v cites calls x in
+                    if resolve t <> L_bool then
+                      refuse (Printf.sprintf "not applied to %s, which is not a bool" (pr_lt t))
+                    else ("(! " ^ a ^ ")", L_bool)
+                | _ -> refuse (Printf.sprintf "a prefix operator applied to %d arguments" (List.length al)))
+           | Pexp_ident { txt } -> render_call scope done_v cites calls (li txt) al
+           | _ -> refuse ("an applied " ^ eclass f ^ ", which is a function value"))
+  | Pexp_tuple _ -> refuse "a tuple, which builds a cell"
+  | Pexp_function _ -> refuse "a function value inside the body"
+  | Pexp_let _ -> refuse "a nested let, which is a statement sequence"
+  | Pexp_record _ -> refuse "a record value, which is §6.2's decision 1"
+  | Pexp_field _ -> refuse "a field read, whose layout this file does not own"
+  | Pexp_match _ -> refuse "a match, whose arms read a tag and a payload out of a cell"
+  | _ -> refuse (Printf.sprintf "%s, which is outside §6.4's licensed scalar set" (eclass e))
+
+(* A name that is not a binder of the body being rendered.  A DATA binding lends the macro
+   the header already defines for it — never a re-typed numeral, which would be the second
+   name §6.4 forbids — and a rendered binding is licensed only APPLIED, not as a value. *)
+and render_name scope done_v cites nm =
+  if Hashtbl.mem scope nm then (nm, resolve (Hashtbl.find scope nm))
+  else if List.mem nm operator_names then
+    refuse (Printf.sprintf "the operator %s used as a value, which needs the function pointer D-60411 forbids" nm)
+  else if not (Hashtbl.mem binds nm) then refuse ("an unbound name " ^ nm)
+  else
+    match Hashtbl.find_opt done_v nm with
+    | None -> raise (Waiting nm)
+    | Some v when v.v_verdict = "DATA" ->
+        let m = macro_for nm in
+        cites := m :: !cites;
+        (m, if Hashtbl.mem vals nm then snd (lt_spine (decl_full nm) []) else L_nat)
+    | Some v when v.v_verdict = "RENDER" ->
+        refuse (Printf.sprintf "names %s as a value; only a call of it is licensed" nm)
+    | Some v -> refuse (v.v_name ^ " is " ^ v.v_verdict ^ ", so nothing exists for it to refer to")
+
+(* Both operands of a licensed infix operator, checked against the family that operator is
+   defined over: the C spelling is equivalent only where the artifact's own types say the
+   values are scalars of one kind. *)
+and render_infix scope done_v cites calls op al =
+  if List.length al <> 2 then
+    refuse (Printf.sprintf "%s applied to %d arguments, and §6.4 licenses no curried call"
+             op (List.length al))
+  else begin
+    let a, ta = render_e scope done_v cites calls (List.nth al 0) in
+    let b, tb = render_e scope done_v cites calls (List.nth al 1) in
+    let logic = op = "&&" || op = "||" in
+    let arith = op = "+" || op = "-" in
+    let ok =
+      if logic then resolve ta = L_bool && resolve tb = L_bool
+      else if arith then resolve ta = L_nat && resolve tb = L_nat
+      else scalar_lt ta && scalar_lt tb
+           && (match resolve ta, resolve tb with
+               | L_nat, L_nat -> true
+               | L_bool, L_bool -> op = "=" || op = "<>"
+               | L_unit, L_unit -> op = "=" || op = "<>"
+               | _ -> false)
+    in
+    if not ok then
+      refuse (Printf.sprintf "%s over %s and %s, which §6.4 licenses only within one scalar family"
+               op (pr_lt ta) (pr_lt tb))
+    else ("(" ^ a ^ " " ^ List.assoc op c_infix ^ " " ^ b ^ ")", if arith then L_nat else L_bool)
+  end
+
+(* A call is licensed only once the callee rendered, and its arity and result come from the
+   interface it exports — not from this walk's opinion of the argument list. *)
+and render_call scope done_v cites calls nm al =
+  if not (Hashtbl.mem binds nm) then
+    refuse (Printf.sprintf "an applied %s that is not a binding of this artifact" nm)
+  else
+    match Hashtbl.find_opt done_v nm with
+    | None -> raise (Waiting nm)
+    | Some v when v.v_verdict <> "RENDER" ->
+        refuse (Printf.sprintf "calls %s, whose verdict is %s, so no definition exists to call"
+                 nm v.v_verdict)
+    | Some _ ->
+        let ps, res = lt_spine (decl_full nm) [] in
+        if List.length ps <> List.length al then
+          refuse (Printf.sprintf "calls %s with %d arguments and its interface has %d"
+                   nm (List.length al) (List.length ps))
+        else begin
+          let rendered = List.map (fun x -> fst (render_e scope done_v cites calls x)) al in
+          calls := nm :: !calls;
+          (c_fn nm ^ "(" ^ String.concat ", " rendered ^ ")", res)
+        end
+
+(* One binding's definition, or the renderer's refusal in its own words.  The parameter names
+   are the artifact's own, which is the rule 2e applied to the prototype this definition must
+   agree with, so the two files cannot state different signatures for one function. *)
+let render_def n done_v =
+  try
+    if not (Hashtbl.mem vals n) then refuse "no signature in the interface, so nothing to match";
+    let b = Hashtbl.find binds n in
+    let ps, res = lt_spine (decl_full n) [] in
+    let names, body = peel_params b.b_body [] in
+    if List.length names <> List.length ps then
+      refuse (Printf.sprintf "its %d binder names do not line up with the %d parameters it exports"
+               (List.length names) (List.length ps));
+    List.iter
+      (fun nm ->
+        if nm = "" || nm = "_" then refuse "an unnamed parameter, which C cannot declare";
+        if List.mem nm c_keywords then
+          refuse (Printf.sprintf "a parameter named %s, which is a C keyword" nm))
+      names;
+    if not (List.for_all scalar_lt ps) || not (scalar_lt res) then
+      refuse "a parameter or result that is not a scalar";
+    let scope = Hashtbl.create 8 in
+    List.iter2 (fun nm t -> Hashtbl.replace scope nm (resolve t)) names ps;
+    let cites = ref [] and calls = ref [] in
+    let expr, got = render_e scope done_v cites calls body in
+    if resolve got <> resolve res then
+      refuse (Printf.sprintf "its body computes %s and the interface it exports says %s"
+               (pr_lt got) (pr_lt res));
+    (* C's `&&`, `||` and every comparison yield `int`; a `jpl_bool` is one word, so the
+       conversion is made explicit instead of being left for -Wconversion to flag. *)
+    let value = if resolve res = L_bool then "(jpl_bool) " ^ expr else expr in
+    let args =
+      if ps = [] then "void"
+      else String.concat ", " (List.map2 (fun nm t -> value_name (resolve t) ^ " " ^ nm) names ps)
+    in
+    Ok (Printf.sprintf "%s %s(%s)\n{\n  return %s;\n}" (value_name res) (c_fn n) args value,
+        List.sort_uniq String.compare !cites,
+        List.sort_uniq String.compare !calls)
+  with Refused m -> Error m
+
+(* The three verdicts that need no knowledge of any other binding, in the order §6.4 lists
+   them.  None is not a verdict — it is the trial's turn. *)
+let base_verdict n schemas =
+  let b = Hashtbl.find binds n in
+  let self = !((Hashtbl.find closure n).self) in  let cls = schema_class schemas n in
+  let v vd rs =
+    Some { v_name = n; v_class = cls; v_verdict = vd; v_reason = rs;
+           v_def = ""; v_cites = []; v_calls = [] }
+  in
+  if cls = "operator alias" || cls = "value alias" then
+    v "ALIAS" "the body IS an operator, so C spells it at the use site and no function exists"
+  else if Hashtbl.mem vals n
+          && (match lt_spine (decl_full n) [] with ([], _) -> true | _ -> false)
+          && try_fold b.b_body <> None then
+    match try_fold b.b_body with
+    | Some x ->
+        v "DATA"
+          (Printf.sprintf "a folded constant (= %d); its C name is %s, which 2e's header already defines"
+             x (macro_for n))
+    | None -> None
+  else if self > 0 || starts cls "BOUNDED FOLD" || starts cls "FUEL LOOP"
+          || starts cls "BLOCKED" then
+    v "OWED-SCHEMA"
+      (Printf.sprintf "%s, and %d direct self-call(s) have no statement form until §6.3's\n\
+        \     rewrite for this schema lands" cls self)
+  else None
+
+(* Does this body touch a pooled value?  BOTH directions count: building one needs the
+   allocator, and reading one needs the cell to exist already.  `raw_bword` and `expand_c`
+   are the rows that show the difference — straight-line, consing nothing, and still taking
+   or returning a word slab — so a rule that looked only at allocation sites would have
+   called them renderable and handed JPL.6 a body that could not compile.  `teqb` is the
+   same shape one rung earlier: it reads a slab too, and is refused for its schema before
+   this rule is ever consulted, which is exactly why the rules are tried in dependency
+   order and only the last of them is the renderer's own set. *)
+let pools_of n =
+  let own = if Hashtbl.mem vals n then sig_pools [] (decl_full n) else [] in
+  let built =
+    List.filter_map
+      (fun (kind, t, owner, ln) ->
+        if owner <> n then None
+        else match pool_of t with Some (arr, _) -> Some (kind, arr, ln) | None -> None)
+      !sites
+  in
+  (own, built)
+
+(* Does the sweep cover this body's whole domain?  A body of one nat parameter is run on
+   every value the artifact's own fuel cap bounds, so the differential over it is exhaustive
+   rather than sampled; anything else (arity 0, arity >1, a bool parameter) is run on a
+   DIAGONAL — one index driving every argument — and the claim for it has to say so. *)
+let sweep_params n = fst (lt_spine (decl_full n) [])
+
+let sweep_total r =
+  match sweep_params r.v_name with
+  | [ t ] -> resolve t = L_nat
+  | _ -> false
+
+(* The census: every member exactly once, in artifact order, the trial re-run until nothing is
+   still waiting on a callee.  A cycle cannot normally reach here — a self-call is OWED-SCHEMA
+   above and a mutual fixpoint was refused before any of this ran — so a row that never
+   settles is printed as what it is rather than given a verdict this file invented. *)
+let print_render members schemas =
+  section "RENDERABILITY: WHICH BODIES NEED NO POOL, NO ALLOCATOR AND NO FUNCTION VALUE";
+  Printf.printf "  The verdict below is the renderer's OWN trial result, not a class this file\n\
+                \  assigned: JPL.md §6.4's licensed scalar set is implemented once, above, and run\n\
+                \  here as a question.  A body the trial refuses is reported in the refusal's own\n\
+                \  words, so the census cannot claim a body is renderable that the emitter then\n\
+                \  could not write.\n";
+  let vd : (string, verdict) Hashtbl.t = Hashtbl.create 64 in
+  let set v = Hashtbl.replace vd v.v_name v in
+  let owed n verdict rs =
+    set { v_name = n; v_class = schema_class schemas n; v_verdict = verdict; v_reason = rs;
+          v_def = ""; v_cites = []; v_calls = [] }
+  in
+  List.iter (fun n -> match base_verdict n schemas with Some v -> set v | None -> ()) members;
+  let trial n =
+    match pools_of n with
+    | [], [] ->
+        (match render_def n vd with
+         | Ok (def, cites, calls) ->
+             set { v_name = n; v_class = schema_class schemas n; v_verdict = "RENDER";
+                   v_reason = "no pool, no cell, no function value: the trial rendered it";
+                   v_def = def; v_cites = cites; v_calls = calls }
+         | Error m -> owed n "OWED-CONSTRUCT" m
+         (* Waiting is not a verdict: the body stays undecided and this pass simply moves on,
+            so the NEXT pass asks the same question with one more callee already answered. *)
+         | exception Waiting _ -> ())
+    | _, (kind, arr, ln) :: _ ->
+        owed n "OWED-REPRESENTATION"
+          (Printf.sprintf "builds %s at line %d, whose cells live in %s" kind ln arr)
+    | (arr, _) :: _, [] ->
+        owed n "OWED-REPRESENTATION"
+          (Printf.sprintf "takes or returns %s, whose cells decision 3's step-boundary copying produces" arr)
+  in
+  let rec loop waiting =
+    let todo = List.filter (fun n -> not (Hashtbl.mem vd n)) members in
+    match todo with
+    | [] -> ()
+    | _ ->
+        List.iter trial todo;
+        let still = List.filter (fun n -> not (Hashtbl.mem vd n)) members in
+        (* a body only ever stays undecided by waiting on a callee, so `waiting` remembers
+           what it was waiting for and the finding can name it *)
+        if still <> [] && still <> waiting then loop still
+        else
+          List.iter
+            (fun n -> owed n "OWED-SCHEMA" "its calls never settled: the bodies it needs depend on it")
+            still
+  in
+  loop [];
+  let rows = List.filter_map (fun n -> Hashtbl.find_opt vd n) members in
+  let by v = List.filter (fun r -> r.v_verdict = v) rows in
+  Printf.printf "\n  %-20s %-36s %-22s %s\n" "binding" "§6.3 schema" "verdict" "what the trial said";
+  List.iter
+    (fun r ->
+      Printf.printf "  %-20s %-36s %-22s %s\n" r.v_name r.v_class r.v_verdict r.v_reason)
+    rows;
+  let rendered = by "RENDER" in
+  Printf.printf "\n  RENDERED BODIES (%d), and what each one cites:\n" (List.length rendered);
+  List.iter
+    (fun r ->
+      Printf.printf "\n  %s\n" (c_fn r.v_name);
+      Printf.printf "    cites   %s\n"
+        (if r.v_cites = [] then "(no data constant)" else String.concat ", " r.v_cites);
+      Printf.printf "    calls   %s\n"
+        (if r.v_calls = [] then "(no other binding)" else String.concat ", " r.v_calls);
+      Printf.printf "    arity   %d, sweep %s\n"
+        (List.length (fst (lt_spine (decl_full r.v_name) [])))
+        (if sweep_total r then "EXHAUSTIVE over 0 … MAX_FUEL (its one nat argument is the index)"
+         else "DIAGONAL: 0 … MAX_FUEL, every argument derived from one index"))
+    rendered;
+  Printf.printf "\n  RENDER PARTITION (every closure member, exactly once)\n";
+  List.iter
+    (fun (v, key, what) ->
+      let n = List.length (by v) in
+      mark key n;
+      Printf.printf "  %-24s %4d   %-24s %s\n" v n key what)
+    [ ("DATA", "data_bindings", "arity-0 constants; the header already names them");
+      ("ALIAS", "alias_bindings", "bodies that ARE an operator, so no function is emitted");
+      ("RENDER", "bodies_renderable", "no pool, no cell, no function value: emitted here");
+      ("OWED-REPRESENTATION", "owed_representation", "touch a pooled value, to build it or to read it");
+      ("OWED-SCHEMA", "owed_schema", "their §6.3 shape has no statement form yet");
+      ("OWED-CONSTRUCT", "owed_construct", "the renderer named the construct it cannot write") ];
+  let total = List.length rows in
+  let unaccounted = List.length members - total in
+  let citing = List.length (List.filter (fun r -> r.v_cites <> []) rendered) in
+  mark "render_unaccounted" unaccounted;
+  mark "bodies_citing_data" citing;
+  Printf.printf "  %-24s %4d   %s\n" "rows" total "one verdict per member visited";
+  Printf.printf "  %-24s %4d   %s\n" "render_unaccounted" unaccounted
+    "a member that received no verdict; must be 0";
+  Printf.printf "  %-24s %4d   %s\n" "bodies_citing_data" citing
+    "rendered bodies that cite a data constant by its header macro";
+  (* One line per DATA binding, in a form the gate can grep rather than re-read as prose:
+     each name below has to be a `#define` in sh_run_jpl.h, because a rendered body that
+     cites a constant the header never defined would be a link error JPL.7 pays for.  The
+     set is closed under the citations — render_name cites only through this same
+     `macro_for`, so a cited macro that fails to resolve would already appear here. *)
+  Printf.printf "\n  THE DATA NAMES A RENDERED BODY CAN RESOLVE TO (the gate finds each one\n\
+                \  as a #define in sh_run_jpl.h)\n";
+  List.iter
+    (fun r -> Printf.printf "  DATA-MACRO %-14s %s\n" r.v_name (macro_for r.v_name))
+    (by "DATA");
+  (* The differential the gate runs against this file, stated as a measurement rather than
+     as a promise: the domain is the artifact's own fuel cap, and what the cap bounds is
+     printed per body so an exhaustive claim and a diagonal one cannot be confused. *)
+  let fuel = (c ()).c_fuel in
+  let exhaustive = List.fold_left (fun a r -> if sweep_total r then a + 1 else a) 0 rendered in
+  let diagonal = List.length rendered - exhaustive in
+  mark "sweep_domain" fuel;
+  mark "bodies_swept_exhaustive" exhaustive;
+  mark "bodies_swept_diagonal" diagonal;
+  Printf.printf "\n  THE DIFFERENTIAL THE GATE RUNS ON THE RENDERED BODIES\n";
+  Printf.printf "    domain     0 … %d  (MAX_FUEL, read from the artifact's own jpl_caps_table:\n\
+                \               the same cap the C allocates against, so neither driver picks\n\
+                \               a range for the claim it is testing)\n" fuel;
+  Printf.printf "    lines      %d per driver, one per index, one field per body in artifact order\n\
+                \               (the two drivers are GENERATED from these same RENDER rows, so a\n\
+                \               body the census invented a test for would show up as a\n\
+                \               transcript whose field count disagrees with this report)\n"
+    (fuel + 1);
+  Printf.printf "    bodies     %d rendered: %d swept EXHAUSTIVELY (one nat parameter = the index),\n\
+                \               %d swept on the DIAGONAL\n" (List.length rendered) exhaustive
+    diagonal;
+  if diagonal > 0 then
+    Printf.printf "\n    SWEEP COVERAGE FINDING: %d rendered body(s) take %s, so 0 … MAX_FUEL\n\
+                  \    exercises only the diagonal of their argument space.  The differential\n\
+                  \    proves agreement there and nowhere else for them; a product sweep needs a\n\
+                  \    budget of its own, which §6.4 does not license this stage to invent.\n"
+      diagonal "more than one argument, or none";
+  (* The ALIAS rows carry a consequence this census can see and cannot fix: 2e's header
+     prototypes `jpl_add`/`jpl_mul` because it reads them as bindings, and §6.3 says an
+     operator alias has no function to define.  Printed as a finding with its owner, because
+     a call left in the artifact would be a link error JPL.7 pays for, not a measurement this
+     file can make up. *)
+  let aliases = by "ALIAS" in
+  if aliases <> [] then begin
+    Printf.printf "\n  FINDING, with an owner (not a failure): %d alias binding(s) have a\n\
+                  \  prototype in sh_run_jpl.h and no definition anywhere, because their body\n\
+                  \  IS a C operator.  Either the representation layer drops those prototypes or\n\
+                  \  JPL.6's lint forbids calling them by name; inventing a definition here\n\
+                  \  would be a second lowering of an operator §6.3 already replaced.\n"
+      (List.length aliases);
+    List.iter (fun r -> Printf.printf "    %-20s %s\n" (c_fn r.v_name) r.v_class) aliases
+  end;
+  if unaccounted <> 0 || total <> List.length members then begin
+    Printf.printf "\nLOWER REFUSAL: the renderability verdicts do not partition the closure\n\
+                  \  (%d rows over %d members), so the census would be reporting an opinion\n\
+                  \  about bindings it did not visit.\n"
+      total (List.length members);
+    exit 1
+  end;
+  Printf.printf "\nRENDERABILITY CONSISTENT: %d of %d members carry one verdict each, and the %d\n\
+                \  rendered bodies are the ones this file can actually print — which is the only\n\
+                \  sense in which a body is renderable.\n"
+    total (List.length members) (List.length rendered);
+  rows
+
+(* The file this section's RENDER rows add up to.  Each definition answers a prototype
+   2e already emitted, so the vendored bytes are checkable against the header they belong
+   to rather than against this file's memory of it. *)
+let write_bodies path rows =
+  let b = Buffer.create 4096 in
+  let fmt s = Printf.ksprintf (fun x -> Buffer.add_string b x) s in
+  let rendered = List.filter (fun r -> r.v_verdict = "RENDER") rows in
+  fmt "/* sh_run_jpl_bodies.c — the function BODIES the lowering census could render,\n\
+      \   JPL.5-B.3b-ii-a.\n\
+      \   GENERATED by verify/c/jpl_lower.ml from the vendored extraction\n\
+      \   (src/kernel/sh_run_c.ml{,i}) over roots mrun_c,step_c — DO NOT EDIT.\n\
+      \   Every definition here ANSWERS a prototype in sh_run_jpl.h, so it is valid only with\n\
+      \   that header, and the gate compiles the two together:\n\
+      \     #include \"sh_run_jpl.h\"\n\
+      \   A body is here because JPL.md §6.4's render trial accepted it: no pool, no allocator,\n\
+      \   no function value.  Nothing here allocates, so nothing here measures the extent that\n\
+      \   §6.2's headroom factor still owes.  The bodies that were refused, and the construct or\n\
+      \   schema that refused each, are in lowering.txt — the count in this file is not the\n\
+      \   census's opinion of itself, it is the same measurement with C attached. */\n\
+      \n\
+      #include \"sh_run_jpl.h\"\n";
+  List.iter
+    (fun r ->
+      fmt "\n/* %s : %s\n" r.v_name (pr_lt (decl_full r.v_name));
+      fmt "   schema %s, verdict %s\n" r.v_class r.v_verdict;
+      fmt "   %s */\n"
+        (if r.v_cites = [] && r.v_calls = [] then "cites no data constant, calls no binding"
+         else
+           Printf.sprintf "cites %s; calls %s"
+             (if r.v_cites = [] then "nothing" else String.concat ", " r.v_cites)
+             (if r.v_calls = [] then "nothing" else String.concat ", " r.v_calls));
+      fmt "%s\n" r.v_def)
+    rendered;
+  fmt "\n/* rendered bodies: %d of %d closure members; the other verdicts are measured in\n\
+      \   lowering.txt and owned by JPL.md §6.3 (§6.4's table says which) */\n"
+    (List.length rendered) (List.length rows);
+  let oc = open_out path in
+  output_string oc (Buffer.contents b);
+  close_out oc
+
+(* ─────────── 8d. the differential the RENDER rows are tested by ─────────── *)
+
+(* "Renderable" is a claim about CONSTRUCTS; correctness of the C is a different claim, and
+   the two drivers here are what make it.  Both are GENERATED from the same RENDER rows this
+   census printed, in the same order, because a hand-typed list of the functions to sweep
+   would be a second model of which bodies exist: the day the renderer gains a rule and the
+   driver list is not updated, the gate would be proving a subset while reporting the whole.
+   The index drives every argument (`i` for a nat, `i mod 2` for a bool), so a body of one
+   nat parameter is swept over its entire bounded domain and anything else is swept on a
+   diagonal — which the report above measures and prints, rather than hiding.
+
+   The domain is JPL_MAX_FUEL on the C side and `mAX_FUEL` on the OCaml side.  Both are the
+   artifact's own cap — one because 2e defined the macro from the extracted record, the other
+   because it IS that record's field — so neither driver chooses the range of the claim it is
+   testing, and a transcript length the gate checks against the census's `sweep_domain` key
+   closes the loop.
+
+   These are HOST programs, not shipped kernel code: they include <stdio.h>, they use printf,
+   and JPL.6's lint does not apply to them.  The kernel's own conformance is sh_run_jpl.h +
+   sh_run_jpl_bodies.c, which check 6 compiles under the full flag set. *)
+
+(* An argument of the rendered body, in each language, derived from the one sweep index.
+   The three cases are exhaustive because a RENDER row exists only for a body whose every
+   parameter passed `scalar_lt` — nat, bool or unit — so no other layout can reach here. *)
+let c_sweep_arg t =
+  match resolve t with
+  | L_nat -> "i"
+  | L_bool -> "((jpl_bool) ((i % 2u) != 0u))"
+  | _ -> "((jpl_unit) 0u)"
+
+let ml_sweep_arg t =
+  match resolve t with
+  | L_nat -> "i"
+  | L_bool -> "((i mod 2) = 1)"
+  | _ -> "()"
+
+(* The call, and the conversion that makes the two languages print one digit per result:
+   OCaml's `true`/`false` becomes 1/0, its `()` becomes 0, and C's `jpl_bool` is already a
+   one-word 0/1 — so a C bool that ever held 2 would show up as a transcript difference
+   instead of being smoothed over by printing both sides as words. *)
+let c_call r =
+  let ps, _ = lt_spine (decl_full r.v_name) [] in
+  c_fn r.v_name ^ "("
+  ^ (if ps = [] then "void" else String.concat ", " (List.map c_sweep_arg ps))
+  ^ ")"
+
+let ml_call r =
+  let ps, res = lt_spine (decl_full r.v_name) [] in
+  (* The artifact's own OCaml name, dots and all: extraction qualifies a name like `Nat.add`
+     with a module path this driver could not spell, and no such binding is a RENDER row —
+     if one ever became one, the OCaml build of the driver would fail rather than silently
+     test nothing.  Every call is parenthesised because the driver passes it straight to
+     `Printf.printf`, where an unparenthesised `f x` would be read as two arguments. *)
+  let app = "Sh_run_c." ^ r.v_name
+            ^ (if ps = [] then "" else " " ^ String.concat " " (List.map ml_sweep_arg ps))
+  in
+  let e = "(" ^ app ^ ")" in
+  match resolve res with
+  | L_bool -> "(if " ^ e ^ " then 1 else 0)"
+  | L_unit -> "(" ^ e ^ "; 0)"
+  | _ -> e
+
+let write_diff_c path rows =
+  let rendered = List.filter (fun r -> r.v_verdict = "RENDER") rows in
+  let fields = 1 + List.length rendered in
+  let lines = (c ()).c_fuel + 1 in
+  let oc = open_out path in
+  Printf.fprintf oc "\
+/* jpl_bodies_diff.c — the C half of the rendered-bodies differential, 5-B.3b-ii-a.
+   GENERATED by verify/c/jpl_lower.ml from the same RENDER rows that wrote
+   sh_run_jpl_bodies.c — DO NOT EDIT, and do not add a function to it by hand.
+   Link with sh_run_jpl_bodies.c; print the %d lines (%d fields: the index, then one
+   per rendered body in artifact order) the OCaml driver jpl_bodies_diff.ml prints,
+   over 0 … JPL_MAX_FUEL — the cap the artifact carries, not a range chosen here.
+   A HOST driver: <stdio.h> and printf are this file's business, not the shipped
+   kernel's, so JPL.6's lint does not audit it. */
+
+#include <stdio.h>
+#include \"sh_run_jpl.h\"
+
+int main(void)
+{
+  jpl_nat i;
+  for (i = 0u; i <= JPL_MAX_FUEL; i = i + 1u) {
+    printf(\"%s\\n\", %s);
+  }
+  return 0;
+}
+"
+    lines fields
+    (String.concat " " (List.init fields (fun _ -> "%u")))
+    (String.concat ", " ("i" :: List.map c_call rendered));
+  close_out oc
+
+let write_diff_ml path rows =
+  let rendered = List.filter (fun r -> r.v_verdict = "RENDER") rows in
+  let fields = 1 + List.length rendered in
+  let lines = (c ()).c_fuel + 1 in
+  let args = String.concat " " ("i" :: List.map ml_call rendered) in
+  let oc = open_out path in
+  Printf.fprintf oc "\
+(* jpl_bodies_diff.ml — the OCaml half of the rendered-bodies differential,
+   5-B.3b-ii-a.  GENERATED by verify/c/jpl_lower.ml from the same RENDER rows that
+   wrote sh_run_jpl_bodies.c — DO NOT EDIT, and do not add a call to it by hand.
+   Compiled against the vendored extraction (src/kernel/sh_run_c.ml{,i}), the SAME
+   artifact the census read, and printing the SAME %d lines (%d fields) as the C
+   driver jpl_bodies_diff.c, over 0 … mAX_FUEL.  `cmp` of the two transcripts is
+   the rung that turns \"the renderer wrote C\" into \"the C computes what the
+   extracted kernel computes\", over every bounded input. *)
+
+let () =
+  let fuel = Sh_run_c.mAX_FUEL in
+  for i = 0 to fuel do
+    Printf.printf \"%s\\n\" %s
+  done
+"
+    lines fields
+    (String.concat " " (List.init fields (fun _ -> "%d")))
+    args;
+  close_out oc
+
 (* ───────────────────────────── 9. the report ───────────────────────────── *)
 
 let print_schema schemas =
@@ -1819,6 +2413,287 @@ let print_obligations schemas pools =
     (Hashtbl.length unknowns);
   List.iter (fun (k, v) -> Printf.printf "       %-62s %d\n" k v) (sortl unknowns)
 
+(* ─────────────── 9e. the second debt (JPL.5-B.3b-ii-b-0, JPL.md §6.5) ─────────────── *)
+
+(* §6.4's rules stop at the first match, which is what the partition needs and what the PLAN
+   does not: an OWED-SCHEMA row has never printed the pools its signature takes or returns,
+   so nothing in the report says whether a `while` form would render it.  This section asks
+   the SAME question the renderability trial asks — `pool_of` over the signature and the
+   binding's own allocation sites, the same reading, nothing re-derived — for every member,
+   and prints both debts beside the one verdict.  It licenses nothing: no verdict changes, no
+   body is emitted here, and the only new claim is about which slice of §6.5's table a row
+   belongs to. *)
+
+(* "no pool" needs a REASON before it can be read as freedom, because the walk stops in three
+   different places (§6.5's second table): a signature that really is scalar, a list-shaped
+   position whose element is still a type variable, and a declared record or variant whose
+   FIELDS the walk does not enter — `step_c : cfg -> out` is the third, and `cfg`'s `ck` field
+   IS the machine stack.  A count that conflated them would let a zero read as a licence. *)
+type sight =
+  { so_pools : (string * string) list; (* (pool array, cell or node type) *)
+    so_open : int;                     (* positions whose type the interface has not decided *)
+    so_opaque : string list }            (* declared types whose fields the walk cannot see *)
+
+(* A named type the walk stops at: declared in the artifact, with no alias to follow, and not
+   one of the self-referential names §6.2 pools by node. *)
+let opaque_ty n =
+  Hashtbl.mem tydecls n
+  && (match alias_of n with Some _ -> false | None -> true)
+  && not (reaches_itself n)
+
+let rec sight acc t =
+  match t with
+  | L_var _ | L_unk _ -> { acc with so_open = acc.so_open + 1 }
+  | L_nat | L_bool | L_unit -> acc
+  | (L_word | L_list _ | L_named _) as x ->
+      let a =
+        match resolve x with
+        | L_list e when has_var e -> { acc with so_open = acc.so_open + 1 }
+        | L_named n when opaque_ty n -> { acc with so_opaque = n :: acc.so_opaque }
+        | _ -> acc
+      in
+      (match pool_of x with Some p -> { a with so_pools = p :: a.so_pools } | None -> a)
+  | L_opt e | L_bres e -> sight acc e
+  | L_pair (p, q) | L_fun (p, q) -> sight (sight acc p) q
+
+(* Both directions, exactly as §6.4's `pools_of` reads them: what a signature carries in, and
+   what this binding's own body builds.  A row whose sites are all still variables lands in
+   `so_open` rather than silently counting as pool-free. *)
+let sight_of n =
+  let z = { so_pools = []; so_open = 0; so_opaque = [] } in
+  let s = if Hashtbl.mem vals n then sight z (decl_full n) else z in
+  List.fold_left
+    (fun a (_kind, t, owner, _ln) -> if owner <> n then a else sight a t)
+    s
+    !sites
+
+(* §6.3's shape debt, read the way §6.4's rule reads it: a direct self-call, or a class whose
+   first statement has no C form.  The two tail-loop classes are named by their exact printed
+   class rather than by a prefix, and the four one-trip fuel idioms are deliberately NOT in
+   the debt set, because §6.3 says their step binder never calls back and JPL.6 must not read
+   that as recursion.  The agreement between this predicate and §6.4's rule is asserted below
+   as `debt_unaccounted`, not assumed: if the two ever disagree, the census refuses. *)
+let shape_debt schemas n =
+  let cls = schema_class schemas n in
+  let self = !((Hashtbl.find closure n).self) in
+  self > 0
+  || cls = "fuel tail loop"
+  || cls = "structural tail loop"
+  || starts cls "BOUNDED FOLD"
+  || starts cls "BLOCKED"
+
+(* What the ABI already decided about a variable-classified row: the closed instances §6.3
+   rendered from the CALL SITES, which are the artifact's answer to a signature the interface
+   left polymorphic.  A row that is pool-free "because a variable is unresolved" and has a
+   closed instance at `jpl_text_list` is not free in the sense the slice order cares about —
+   the cell type exists, in sh_run_jpl_abi.h, and only this walk failed to see it. *)
+let instance_pools binding abi_rows =
+  let rows = List.filter (fun (r : abi_row) -> r.a_binding = binding) abi_rows in
+  let pools =
+    List.concat_map
+      (fun (r : abi_row) ->
+        List.fold_left (fun a p -> sig_pools a p) (sig_pools [] r.a_result) r.a_params)
+      rows
+  in
+  ( List.length rows,
+    List.sort_uniq String.compare (List.map fst pools) )
+
+let print_debts schemas abi_rows rows =
+  section "THE SECOND DEBT: WHAT AN OWED ROW ALSO TOUCHES (JPL.md §6.5)";
+  Printf.printf "  A row has ONE verdict because §6.4's rules run in dependency order and the first\n\
+                \  match owns it.  A row can still owe TWO debts: §6.3's shape and §6.2/decision 3's\n\
+                \  representation.  The two columns below are the readings the renderability trial\n\
+                \  already consults, asked of every member rather than only of the one that won — so\n\
+                \  this section cannot claim a pool the trial declined to look at, and it changes no\n\
+                \  verdict.\n";
+  let pool_names s = List.sort_uniq String.compare (List.map fst s.so_pools) in
+  let free_as s =
+    if s.so_pools <> [] then ""
+    else if s.so_opaque <> [] then "opaque"
+    else if s.so_open > 0 then "var"
+    else "scalar"
+  in
+  let unaccounted = ref ([] : (string * string) list) in
+  Printf.printf "\n  %-20s %-21s %-7s %-5s %-9s %s\n" "binding" "§6.4 verdict" "§6.3" "pool"
+    "free as" "pools the walk sees, or why it sees none";
+  List.iter
+    (fun (r : verdict) ->
+      let s = sight_of r.v_name in
+      let shape = shape_debt schemas r.v_name || starts r.v_reason "its calls never settled" in
+      let pooled = s.so_pools <> [] in
+      let why = free_as s in
+      let note =
+        if pooled then String.concat ", " (pool_names s)
+        else if why = "opaque" then
+          Printf.sprintf "no cell — %s (a declared type whose fields this walk does not enter)"
+            (String.concat ", " (List.sort_uniq String.compare s.so_opaque))
+        else if why = "var" then
+          Printf.sprintf "no cell — %d position(s) whose type the interface has not decided"
+            s.so_open
+        else if why = "scalar" then "no cell — every position is nat/bool/unit"
+        else "(a DATA/ALIAS/RENDER row: no debt of either kind)"
+      in
+      (* The consistency assertion of §6.5: a verdict must be EXPLAINED by the debts on its own\n
+         row.  A member refused for a pool the walk cannot find, or refused while owing nothing,\n\
+         would mean §6.4's rule order is not the dependency order the report claims. *)
+      let bad what = unaccounted := (r.v_name, what) :: !unaccounted in
+      (match r.v_verdict with
+       | "OWED-REPRESENTATION" ->
+           if not pooled then
+             bad "verdicted OWED-REPRESENTATION with no pool in its signature or its sites"
+       | "OWED-SCHEMA" ->
+           if not shape && not pooled then
+             bad "verdicted OWED-SCHEMA while owing neither debt this section measures"
+       | _ ->
+           if pooled || shape then
+             bad
+               (Printf.sprintf "verdicted %s while %s" r.v_verdict
+                  (if pooled then "touching a pool the trial never consulted"
+                   else "carrying a §6.3 shape the rule order should have caught first")));
+      Printf.printf "  %-20s %-21s %-7s %-5s %-9s %s\n" r.v_name r.v_verdict
+        (if shape then "yes" else "no")
+        (if pooled then "yes" else "no")
+        (if why = "" then "-" else why) note)
+    rows;
+  let refused =
+    List.filter
+      (fun (r : verdict) ->
+        r.v_verdict = "OWED-SCHEMA" || r.v_verdict = "OWED-CONSTRUCT"
+        || r.v_verdict = "OWED-REPRESENTATION")
+      rows
+  in
+  let schema_rows = List.filter (fun (r : verdict) -> r.v_verdict = "OWED-SCHEMA") rows in
+  let pools_of_verdict vs =
+    List.filter (fun (r : verdict) -> (sight_of r.v_name).so_pools <> []) vs
+  in
+  let with_pool = pools_of_verdict schema_rows in
+  let free = List.filter (fun (r : verdict) -> (sight_of r.v_name).so_pools = []) schema_rows in
+  let by_reason k =
+    List.filter
+      (fun (r : verdict) ->
+        let s = sight_of r.v_name in
+        s.so_pools = [] && free_as s = k)
+      free
+  in
+  let var_rows = by_reason "var" in
+  let opaque_rows = by_reason "opaque" in
+  let scalar_rows = by_reason "scalar" in
+  let construct_rows =
+    List.filter (fun (r : verdict) -> r.v_verdict = "OWED-CONSTRUCT") rows
+  in
+  let refused_pool = pools_of_verdict refused in
+  (* BOTH debts, not "a refused row with a pool": an OWED-REPRESENTATION row carries the pool
+     and no shape (§6.4's order makes the two sets disjoint by construction), so this count is
+     the schema set's overlap and nothing else — the wider number is printed with it. *)
+  let dual =
+    List.filter
+      (fun (r : verdict) ->
+        (shape_debt schemas r.v_name || starts r.v_reason "its calls never settled")
+        && (sight_of r.v_name).so_pools <> [])
+      refused
+  in
+  let inst_pooled =
+    List.filter
+      (fun (r : verdict) -> snd (instance_pools r.v_name abi_rows) <> [])
+      var_rows
+  in
+  Printf.printf "\n  THE SHAPE SET, SPLIT BY ITS SECOND DEBT (%d OWED-SCHEMA rows)\n"
+    (List.length schema_rows);
+  List.iter
+    (fun (k, v, what) ->
+      mark k (List.length v);
+      Printf.printf "  %-38s %4d   %s\n" k (List.length v) what)
+    [ ("owed_schema_also_pool", with_pool,
+       "a §6.3 shape AND a pool: the loop form alone renders nothing");
+      ("owed_schema_pool_free", free,
+       "no pool THIS WALK can see — read the reason rows below, never this number, as freedom");
+      ("owed_schema_pool_free_var", var_rows,
+       "a position is still a TYPE VARIABLE, so the interface never decided the cell");
+      ("owed_schema_pool_free_opaque", opaque_rows,
+       "a position is a declared record/variant whose fields the walk does not enter");
+      ("owed_schema_pool_free_scalar", scalar_rows,
+       "every position is nat/bool/unit: pool-free in the sense ii-b-3 could use today");
+      ("owed_construct_also_pool", pools_of_verdict construct_rows,
+       "an OWED-CONSTRUCT row that also touches a pool: 0 is the §6.4 rule order holding, since\n\
+        \     the trial consults pools BEFORE it consults its licensed set");
+      ("dual_debt_rows", dual,
+       "rows carrying BOTH debts, counted over every refused verdict");
+      ("owed_schema_free_var_pooled_instance", inst_pooled,
+       "variable-classified schema rows whose closed instance in sh_run_jpl_abi.h IS pooled") ];
+  Printf.printf "  %-38s %4d   %s\n" "rows (both columns, every member)" (List.length rows)
+    "the same 47 §6.4 partitions, read twice instead of once";
+  List.iter
+    (fun (r : verdict) ->
+      Printf.printf "    FINDING %-18s %s — %s\n" r.v_name r.v_verdict
+        (String.concat ", " (pool_names (sight_of r.v_name))))
+    (pools_of_verdict construct_rows);
+  Printf.printf "\n  THE DUAL ROWS, ONE LINE EACH (%d of the %d refused rows that touch a pool;\n                \  the other %d are the §6.4 OWED-REPRESENTATION rows, which carry the pool and\n                \  no shape — %d + %d + %d = %d is asserted by 2f's check 5)\n"
+    (List.length dual) (List.length refused_pool)
+    (List.length refused_pool - List.length dual)
+    (List.length with_pool) (List.length (pools_of_verdict construct_rows))
+    (List.length refused_pool - List.length dual - List.length (pools_of_verdict construct_rows))
+    (List.length refused_pool);
+  List.iter
+    (fun (r : verdict) ->
+      Printf.printf "    %-18s %-38s %-21s %s\n" r.v_name r.v_class r.v_verdict
+        (String.concat ", " (pool_names (sight_of r.v_name))))
+    dual;
+  (* The cross-check §6.5 commissions: a variable is not a freedom when the call sites have\n
+     already closed it.  Printed per row, because which rows is the finding. *)
+  Printf.printf "\n  WHAT THE ABI ALREADY DECIDED ABOUT THE VARIABLE-CLASSIFIED ROWS\n";
+  Printf.printf "  A row above whose signature carries a type variable is pool-free only while the\n\
+                \  interface is the authority: §6.3's instance set closes the same variable at the\n\
+                \  CALL SITES, and sh_run_jpl_abi.h is the artifact's answer.  This is one\n\
+                \  measurement read against another, not a third claim about the bytes.\n";
+  List.iter
+    (fun (r : verdict) ->
+      let n, pools = instance_pools r.v_name abi_rows in
+      Printf.printf "    %-18s %d closed instance(s) — %s\n" r.v_name n
+        (if pools <> [] then "POOLED as " ^ String.concat ", " pools
+         else if n = 0 then "the shipped closure never closed it (§6.3's open set)"
+         else "no pool in any closed instance"))
+    var_rows;
+  Printf.printf "\n  THE READING THIS COLUMN EXISTS FOR: %d of the %d §6.3-shape rows carry the\n\
+                \  representation debt as well; %d more are pool-free only because a TYPE VARIABLE\n\
+                \  is unresolved (and %d of those have a closed instance that IS pooled, so the\n\
+                \  cell type exists and only this walk could not see it); %d are pool-free because\n\
+                \  the walk stops at a declared type's FIELDS; %d are pool-free in the plain sense.\n\
+                \  A `while' statement form therefore renders bodies only where that last number is\n\
+                \  nonzero, and §6.5 puts ii-b-1 and ii-b-2 before ii-b-3 and ii-b-4 because this\n\
+                \  measures it, not because the plan prefers it.\n"
+    (List.length with_pool) (List.length schema_rows) (List.length var_rows)
+    (List.length inst_pooled) (List.length opaque_rows) (List.length scalar_rows);
+  if scalar_rows <> [] then begin
+    Printf.printf "\n  SLICE FINDING: %d schema row(s) really are pool-free, so ii-b-3/ii-b-4 has\n\
+                  \  work that does not wait on the allocator:\n"
+      (List.length scalar_rows);
+    List.iter (fun (r : verdict) -> Printf.printf "    %-18s %s\n" r.v_name r.v_class) scalar_rows
+  end;
+  (* The floor wording, printed rather than left to the reader: the walk stops at a field\n
+     boundary, so a count of pool-free rows is a FLOOR, and 2f's check 3 already sees the\n\
+     evidence — a frame pool declared by §6.2's decision 1 and demanded by nothing. *)
+  Printf.printf "\n  A FLOOR, NOT A CEILING: this walk reads aliases, lists, options, pairs and\n\
+                \  arrows, and stops at a declared record or variant.  That is why 2e's header\n\
+                \  declares jpl_frame_pool (§6.2's decision 1) while the census demands no frame\n\
+                \  NODE cell from anything: the machine's stack reaches the roots through cfg and\n\
+                \  cstate, behind a field boundary.  Every pool-free count above is a FLOOR.\n\
+                \  Entering record fields would move rows between §6.4's verdicts, so it is a\n\
+                \  slice of its own and not something this section does quietly.\n";
+  let bad = List.rev !unaccounted in
+  mark "debt_unaccounted" (List.length bad);
+  Printf.printf "  %-38s %4d   %s\n" "debt_unaccounted" (List.length bad)
+    "a row whose debts do not explain its verdict; must be 0";
+  if bad <> [] then begin
+    Printf.printf "\nLOWER REFUSAL: §6.4's verdicts and §6.5's debts disagree for %d member(s), so\n\
+                  \  either the rule order is not the dependency order this report claims, or a\n\
+                  \  refusal printed here has no measurement behind it:\n"
+      (List.length bad);
+    List.iter (fun (n, w) -> Printf.printf "    %-18s %s\n" n w) bad;
+    exit 1
+  end;
+  Printf.printf "\nDEBTS CONSISTENT: every verdict in the partition is explained by the debts\n\
+                \  measured on the same row — %d refused members, %d of them carrying both.\n"
+    (List.length refused) (List.length dual)
 (* ───────────────────────────── 10. main ────────────────────────────────── *)
 
 (* The gate reads keys, not prose.  Every value below was marked by the section that
@@ -1848,7 +2723,28 @@ let summary_keys =
     ("abi_refused_no_c_type", "closed instances no C prototype can name (D-60411)");
     ("abi_bodies_expressible", "prototypes whose binding has a C form under §6.3");
     ("abi_bodies_owed", "prototypes whose body waits on a model-side rewrite");
-    ("abi_blocked_outside_fold_set", "a refusal §6.3 assigns to no owner; must be 0") ]
+    ("abi_blocked_outside_fold_set", "a refusal §6.3 assigns to no owner; must be 0");
+    ("data_bindings", "members that are a folded constant the header already names");
+    ("alias_bindings", "members whose body IS an operator, so no function is emitted");
+    ("bodies_renderable", "members the §6.4 render trial accepted, and emitted as C");
+    ("owed_representation", "members that build or read a pooled cell");
+    ("owed_schema", "members whose §6.3 shape has no statement form yet");
+    ("owed_construct", "members the renderer refused, in the refusal's own words");
+    ("bodies_citing_data", "rendered bodies that cite a data constant by its header macro");
+    ("render_unaccounted", "a member that received no verdict; must be 0");
+    ("sweep_domain", "the last index both generated drivers sweep (the artifact's MAX_FUEL)");
+    ("bodies_swept_exhaustive", "rendered bodies whose whole bounded domain the sweep covers");
+    ("bodies_swept_diagonal", "rendered bodies the sweep only exercises along one diagonal");
+    ("owed_schema_also_pool", "members owing a §6.3 shape AND a pool (§6.5's dual debt)");
+    ("owed_schema_pool_free", "members owing a §6.3 shape and no pool THIS WALK sees");
+    ("owed_schema_pool_free_var", "of those: a position the interface left a type variable");
+    ("owed_schema_pool_free_opaque", "of those: a position behind a declared type's fields");
+    ("owed_schema_pool_free_scalar", "of those: pool-free in the sense a loop form could use today");
+    ("owed_schema_free_var_pooled_instance",
+     "of those, rows whose closed instance in the ABI header IS pooled");
+    ("owed_construct_also_pool", "members refused for a construct that also touch a pool; must be 0");
+    ("dual_debt_rows", "refused members carrying both the shape debt and the pool debt");
+    ("debt_unaccounted", "a verdict its own row's debts do not explain; must be 0") ]
 
 let print_summary () =
   section "SUMMARY (one key per line, for the gate to read instead of formatted prose)";
@@ -1877,7 +2773,7 @@ type row =
     r_inferred : lt;
     r_declared : lt }
 
-let main ml mli roots abi_out =
+let main ml mli roots abi_out bodies_out diff_out =
   src_path := ml;
   let items = Parse.implementation (Lexing.from_channel (open_in ml)) in
   add_struct "" items;
@@ -1956,6 +2852,10 @@ let main ml mli roots abi_out =
   print_instances members;
   (* the closed set rendered as C, and the refusals that rendering makes visible *)
   let abi_rows = print_abi members schemas in
+  (* the same rendering question, asked of every member rather than only of the R8 instances *)
+  let render_rows = print_render members schemas in
+  (* the same rows, read a second time for the debt §6.4's rule order suppresses (§6.5) *)
+  print_debts schemas abi_rows render_rows;
 
   section "SIGNATURE CONSISTENCY (each body unified against the interface it exports)";
   Printf.printf "  No row here re-derives a type: the `.mli`'s type is pushed DOWN into the\n\
@@ -2022,22 +2922,39 @@ let main ml mli roots abi_out =
     (List.length (List.filter (fun s -> s.s_class = "BOUNDED FOLD (non-tail)") schemas))
     (Hashtbl.length unknowns);
   print_summary ();
-  (* The header is written only on a complete run: a census that refused would otherwise
-     leave a plausible-looking ABI next to a measurement that does not support it. *)
+  (* The header, the bodies and the two drivers are written only on a complete run: a census
+     that refused would otherwise leave a plausible-looking ABI, plausible-looking C and a
+     plausible-looking differential next to a measurement that does not support them. *)
   (match abi_out with
    | Some p -> write_abi p abi_rows
+   | None -> ());
+  (match bodies_out with
+   | Some p -> write_bodies p render_rows
+   | None -> ());
+  (match diff_out with
+   | Some (c_path, ml_path) ->
+       write_diff_c c_path render_rows;
+       write_diff_ml ml_path render_rows
    | None -> ())
 
 let () =
   match List.tl (Array.to_list Sys.argv) with
   | [ ml; mli ] ->
-      (try main ml mli default_roots None with
+      (try main ml mli default_roots None None None with
        | Conflict m -> fail ("the artifact contradicts its own interface: " ^ m))
   | [ ml; mli; rs ] ->
-      (try main ml mli (split_commas rs) None with
+      (try main ml mli (split_commas rs) None None None with
        | Conflict m -> fail ("the artifact contradicts its own interface: " ^ m))
   | [ ml; mli; rs; abi ] ->
-      (try main ml mli (split_commas rs) (Some abi) with
+      (try main ml mli (split_commas rs) (Some abi) None None with
+       | Conflict m -> fail ("the artifact contradicts its own interface: " ^ m))
+  | [ ml; mli; rs; abi; bodies ] ->
+      (try main ml mli (split_commas rs) (Some abi) (Some bodies) None with
+       | Conflict m -> fail ("the artifact contradicts its own interface: " ^ m))
+  | [ ml; mli; rs; abi; bodies; diff_c; diff_ml ] ->
+      (try main ml mli (split_commas rs) (Some abi) (Some bodies) (Some (diff_c, diff_ml)) with
        | Conflict m -> fail ("the artifact contradicts its own interface: " ^ m))
   | _ ->
-      fail "usage: jpl_lower <ml> <mli> [comma-separated-roots] [path-for-the-abi-header]"
+      fail "usage: jpl_lower <ml> <mli> [comma-separated-roots] \
+            [path-for-the-abi-header] [path-for-the-rendered-bodies] \
+            [path-for-the-c-differential-driver] [path-for-the-ocaml-differential-driver]"

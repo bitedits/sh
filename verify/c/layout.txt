@@ -96,6 +96,73 @@ artifact   89 bindings, 83 typed signatures, 15 type declarations
   sh_concrete.v §1 only intends — see JPL.md §6's follow-on note.
 
 
+==== POOL RUNTIME (JPL.md §6.6): one bounded region per sized pool ====
+  stem                   capacity macro             cells of                       handled as                 runtime names
+  word                   JPL_POOL_WORD              jpl_text                       jpl_wref                   _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  pair_text_text_list    JPL_POOL_PAIR_TEXT_TEXT_LIST jpl_pair_text_text_list_cell   jpl_pair_text_text_list    _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  cmd                    JPL_POOL_CMD               jpl_cmd_node                   jpl_cmd                    _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  text_list              JPL_POOL_TEXT_LIST         jpl_text_list_cell             jpl_text_list              _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  cmd_list               JPL_POOL_CMD_LIST          jpl_cmd_list_cell              jpl_cmd_list               _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  pair_text_list_cmd_list_list JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST jpl_pair_text_list_cmd_list_list_cell jpl_pair_text_list_cmd_list_list _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  frame                  JPL_POOL_FRAME             jpl_frame_node                 jpl_frame                  _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+  frame_list             JPL_POOL_FRAME_LIST        jpl_frame_list_cell            jpl_frame_list             _alloc, _reset, _is_live, _next, _peak, _taken, _refused
+
+  Reclamation is at REGION granularity: a reset returns every cell at once,
+  because a per-cell free needs the reachability rule §6.5's ii-b-2 owns before it is
+  safe, not a function.  A reset does not clear cells, and `is_live` is the guard rail
+  that makes a handle carried across one observable (§6.6).  `peak` is the quantity
+  decision 4 said no walk over the artifact's text could produce — a run measures it.
+  With no kernel that allocates yet, every peak in this tree is 0: this is the
+  instrument, not the number, and the gate prints that zero as one.
+
+==== RUNTIME SUMMARY (the keys verify/c/jpl_emit.sh asserts — a missing key is a failure) ====
+  pools_declared                                  8   arrays the layout section declares
+  pools_with_capacity                             8   the ones sized from the cap table
+  pools_without_capacity                          0   sized by nothing, so runtime-free
+  allocators_emitted                              8   one jpl_<stem>_alloc per sized pool
+  resets_emitted                                  8   one jpl_<stem>_reset per sized pool
+  live_checks_emitted                             8   one jpl_<stem>_is_live per sized pool
+  counters_emitted                               32   next, peak, taken, refused per sized pool
+  pool_arrays_defined                             8   arrays the generated translation unit defines
+  refusals_sum_terms                              8   terms in jpl_pools_refusals's saturating sum
+  allocator_handles_defined_in_layout             8   an allocator's return type is a typedef the layout emitted
+  runtime_names_colliding_with_prototypes         0   a runtime name that is also a closure symbol — must be 0
+  runtime_cells_total                         80644   cells across every sized pool
+  runtime_bytes_total                      34866192   bytes of static storage the pools occupy
+
+RUNTIME EMITTED: 8 pools, 80644 cells, 34049.0 KiB of static storage, one bounded region each.
+
+==== EDGE TABLES (JPL.md §6.7, 5-B.3b-ii-b-2a): one class per WORD of every sized pool ====
+  stem                   cell                            rows  words   scalar   unused    edges
+  word                   jpl_text                           1    257      257        0        0
+  pair_text_text_list    jpl_pair_text_text_list_cell       1      3        0        0        3
+  cmd                    jpl_cmd_node                      11      4       12       12       20
+  text_list              jpl_text_list_cell                 1      2        0        0        2
+  cmd_list               jpl_cmd_list_cell                  1      2        0        0        2
+  pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_cell     1      3        0        0        3
+  frame                  jpl_frame_node                     9      5       17       15       13
+  frame_list             jpl_frame_list_cell                1      2        0        0        2
+
+  8 tables, 26 rows, 358 classes, and the three of them partition the
+  table exactly: 286 scalar + 27 unused + 45 edges = 358.
+  2 position(s) flattened a by-value aggregate into its leaf words — the sites where a
+  pooled cell holds an inline pair, which is why the table is per word and not per field
+  (§6.7).  A per-field table would have needed a second table saying how the field
+  splits; this one pins its own width against the cell's sizeof in the header instead.
+  An edge may name 8 target pools — every pool this header declares.
+
+==== EDGE SUMMARY (the keys verify/c/jpl_emit.sh asserts — a missing key is a failure) ====
+  edge_tables_emitted                             8   one jpl_<stem>_edge per sized pool
+  edge_rows_derived                              26   constructors, plus one row per untagged cell
+  edge_entries_derived                          358   classes across every table = rows x words per cell
+  edge_class_scalars                            286   words holding a value: nothing to forward
+  edge_class_unuseds                             27   words past a constructor's arity: never written
+  edge_class_edges                               45   words holding a handle: what evacuation must copy
+  edge_target_pools                               8   pools an edge may name, from the registry
+  edge_aggregates_flattened                       2   positions whose type is inline by value
+  edge_width_checks_emitted                       8   jpl_check_<stem>_edge_covers_the_cell typedefs
+  edge_class_partition_residual                   0   must be 0: the classes are a partition
+
 ==== THE THREE NON-DERIVED CHOICES ====
   1. pooled types            cmd, frame — from sh_jpl.v §1's cap comments, each with
                              cmd -> jpl_cmd_pool of JPL_MAX_CMD cells x headroom 2
