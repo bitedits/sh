@@ -744,7 +744,9 @@ their own.
 |---|---|---|---|
 | ii-b-0 | **this section**: the dual-debt column, its keys, the floor wording | §6.2 decision 3, §6.4's table | nothing — a measurement rung; its output decides which of the slices below is worth doing first |
 | ii-b-1 | pool **allocator + handle runtime**: a bounded allocator per declared pool, handle types, saturate-to-error on exhaustion — **specified as §6.6, landed as `sh_run_jpl_pools.c`**; §6.6 chose a **region** with `reset` over a free list, because a per-cell `release` is ii-b-2's reachability rule before it is a function | decision 3 (extent half still open, §6.2 decision 4) | makes a *cell* exist; still no body, because a body must also be allowed to return one |
-| ii-b-2 | **step-boundary copying**: values are copied into pool cells at a step boundary and reads take handles, per decision 3's collection rule — and with it the **reachability rule §6.6 declined to invent**, which is what makes a per-cell `release`, or a survivor surviving `reset`, meaningful at all.  **Specified as §6.7**, which splits it into ii-b-2a..e and resolves §6.1's "not a region reset" as *reset-without-evacuation*; the first slice is the edge table, because R7's one-word slots currently erase which slot is a handle | decision 3 | unlocks the 13 `OWED-REPRESENTATION` rows whose schema is straight-line or a one-trip fuel idiom — the first set that can become C bodies |
+| ii-b-2 | **step-boundary copying**: values are copied into pool cells at a step boundary and reads take handles, per decision 3's collection rule — and with it the **reachability rule §6.6 declined to invent**, which is what makes a per-cell `release`, or a survivor surviving `reset`, meaningful at all.  **Specified as §6.7**, which splits it into ii-b-2a..e and resolves §6.1's "not a region reset" as *reset-without-evacuation*; the first slice is the edge table, because R7's one-word slots currently erase which slot is a handle.  **ii-b-2a landed 2026-10-05, ii-b-2b 2026-10-06 and ii-b-2c 2026-10-06**, so the classes, the
+two-interval space and the per-cell move all exist; what does not exist yet is the *caller* — no root
+list, no `jpl_collect()`, so no kernel step boundary reads a table to fill the other interval | decision 3 | unlocks the 13 `OWED-REPRESENTATION` rows whose schema is straight-line or a one-trip fuel idiom — the first set that can become C bodies |
 | ii-b-3 | **fuel tail loop → `while (fuel > 0)`** | §6.3's fuel class (7 bindings) | the loop form is expressible today; a *body* needs ii-b-1/2 for its operands, which is what the column measures |
 | ii-b-4 | **structural tail loop → handle-walk `while`** | §6.3's structural class (3 bindings, and `rev_append`'s 2 closed instances, the only ABI bodies §6.3 calls expressible) | same dependency as ii-b-3, plus the pool's `next` chain as the walk's advance |
 | ii-b-5 | **`MAX_STACK` depth guard**: a saturating check, or a model-side proof of the bound the pool size already assumes | decision 3's named debt, §6.3's `MAX_STACK` finding (0 checks of either kind) | renders nothing; it is what makes the frame pool honest rather than decorative |
@@ -843,25 +845,39 @@ function.
 written eight times by the emitter, never by a reader:
 
 ```c
-/* the word slab: s = word, C = JPL_POOL_WORD = 33284 cells including index 0 */
-extern jpl_ref  jpl_word_next;     /* lowest index never handed out; starts at 1 */
-extern jpl_ref  jpl_word_peak;     /* max (next - 1) ever reached in one region */
+/* the word slab: s = word, C = JPL_POOL_WORD = 33286 indices = 2 spaces × (16642 + 1) */
+extern jpl_ref  jpl_word_next;     /* the CURRENT interval's allocation pointer, an absolute index */
+extern jpl_ref  jpl_word_peak;     /* the most cells ONE interval ever served — a count, not an index */
 extern jpl_ref  jpl_word_taken;    /* cells served, saturating at the counter's own top */
 extern jpl_ref  jpl_word_refused;  /* allocations that found no cell: §4.2's edge */
 extern jpl_text jpl_word_pool[JPL_POOL_WORD];
+extern jpl_ref  jpl_word_origin[JPL_POOL_WORD];  /* §6.7: copied FROM, one entry per index */
 
-jpl_wref jpl_word_alloc(void);           /* JPL_NIL when the region is full    */
-jpl_ref  jpl_word_reset(void);           /* cells returned; next goes back to 1 */
-jpl_bool jpl_word_is_live(jpl_ref h);    /* h is a cell of THIS region          */
-jpl_nat  jpl_pools_refusals(void);       /* the one sum the host reads          */
+jpl_wref jpl_word_alloc(void);           /* JPL_NIL when the current interval is full     */
+jpl_ref  jpl_word_reset(void);           /* cells returned; next goes to the current base + 1 */
+jpl_bool jpl_word_is_live(jpl_ref h);    /* h is a cell of the CURRENT interval           */
+jpl_nat  jpl_pools_swap(void);           /* the one writer of the current interval        */
+jpl_nat  jpl_pools_refusals(void);       /* the one sum the host reads                    */
 ```
 
 Index `0` stays reserved — the header already says "index 0 is `JPL_NIL` and is never
-allocated, so a capacity counts the reserved cell too" — so the usable range is
-`1 … C-1` and `C-1` is the largest number of cells any pool can ever hand out.  That
-off-by-one is a *property the gate measures*, not a convention: the probe allocates until it
-is refused and must be served exactly `C-1` cells, where `C` is read out of the header's own
-`#define`.
+allocated, so a capacity counts the reserved cell too" — and since §6.7's ii-b-2b **each
+interval reserves its own**: a space of `C/SPACES` indices serves `C/SPACES - 1` cells, and the
+two indices that name no cell are `0` and `cap + 1`.  That off-by-one is *a property the gate
+measures*, not a convention: the probe allocates until it is refused, in **both** intervals, and
+must be served exactly `cap` cells each time, where every bound is read out of the header's own
+`#define`s.  `is_live` is then the three-bound interval test of §6.7 paragraph 4 — above the
+current base, below the current top, below `next` — which is what turns a handle carried across
+a swap into a decidable fact rather than a liveness analysis.
+
+*How this differs from the one-region reading this section first landed, and why ii-b-2b had to
+take the swap with it*: at one interval `C` was `2·cap`, `next` started at `1u`, `peak` was a
+high-water index, and `is_live`'s interval test was observationally identical to `h != JPL_NIL &&
+h < next` — so §6.7's design item (iii), a stale handle **below the current `next`**, could not be
+fired by any probe.  The swap is therefore part of this slice and not of ii-b-2d: one global
+`jpl_pools_space`, one writer `jpl_pools_swap()`, and 2d arrives to find the boundary already
+crossable.  §6.6's *Measured* paragraph below is the two-interval reading, rewritten in the same
+edit that re-pinned the evidence.
 
 **Naming is derived, so it cannot drift.**  The stem is the substring of the array name
 between `jpl_` and `_pool` — the same extraction that already spells `JPL_<KIND>` — so a pool
@@ -900,13 +916,18 @@ replace it with, and the gate will print `peak = 0` as what it means rather than
 read as "the pool is nearly empty".
 
 **`is_live` is a guard rail, not a liveness analysis.**  The runtime can answer one question
-without knowing the graph: `h != JPL_NIL && h < next` says `h` was handed out by *this*
-region.  It catches the failure a region design can produce — a handle carried across a
-`reset` and then reused as if it were fresh.  It cannot catch a stale handle that happens to
-be below the current `next`, which is precisely the aliasing ii-b-2's copy rule has to make
-impossible by copying survivors before the rewind.  So `is_live` makes a mistake *observable*
-in a probe; the correctness of the copy discipline stays with #26 and #27, as everything
-behavioural in this plan does.
+without knowing the graph: at one interval, `h != JPL_NIL && h < next` said `h` was handed out by
+*this* region.  Since §6.7's ii-b-2b the question has one more bound and the paragraph's second
+half is what changed: `h > CUR_BASE && h < CUR_TOP && h < next` also says `h` was born in the
+interval that is *current*, so the stale handle the one-interval test could not see — one below the
+current `next` but from the interval the swap abandoned — is now refused by a comparison, with no
+reachability analysis anywhere.  What remains out of reach is the case no bounds test can express:
+a handle into the *current* interval whose cell has been logically dead long before the interval
+moves.  That is aliasing the copy rule must make impossible by evacuating survivors, and §6.6's
+region design still does not clear cells.  So `is_live` makes a mistake *observable* in a probe —
+now including the cross-interval mistake, which the gate fires on deliberately — while the
+correctness of the copy discipline stays with #26 and #27, as everything behavioural in this plan
+does.
 
 **What this is *not*.**  §2.1 says transforms live in the Coq source and the emitter's one
 mechanical duty is layout.  The runtime is layout's third person: `nat` → `uint32_t` and
@@ -926,14 +947,27 @@ definitions and every counter's arithmetic are checked by the compiler, includin
 could never see a defined object.  (2) A sweep generated from the header's own
 `jpl_<stem>_alloc(void);` lines — one function per declared allocator, so the probe carries **no
 number of its own** any more than the cap probe does — links against that TU and, per pool,
-drives a whole region: the first handle must be `1u`, successive handles must be distinct
-neighbours and `is_live`, `JPL_NIL` must never be live, the region must stop serving at exactly
-`C-1` cells, `refused` must equal the attempts that produced no handle, three further attempts
-must move `next` not at all, `reset` must return `C-1` and leave `next == 1u`, a handle from the
-returned region must read dead while `taken`, `peak` and `refused` read unchanged (they are
-instruments, not part of the region), and a fresh `alloc` must hand back `1u` again.  Every
-bound in it is the pool's own `JPL_POOL_<KIND>` macro, read out of the header, so the sweep and
-the allocator compare against one constant.  (3) The report's `RUNTIME SUMMARY` keys are then
+drives **both intervals** (the shape below is ii-b-2b's; at one interval the same sweep stopped at
+the first `reset`): the first handle must be the interval's own base + 1, successive handles must
+be distinct neighbours and `is_live`, `JPL_NIL` and the interval's own top index must never be
+live, the interval must stop serving at exactly `cap` cells (`C/SPACES - 1`, read out of the
+header's macros), `refused` must equal the attempts that produced no handle, three further attempts
+must move `next` not at all, `reset` must return `cap` and leave `next` at its own base + 1, a
+handle from the returned interval must read dead while `taken`, `peak` and `refused` read unchanged
+(they are instruments, not part of the region), and a fresh `alloc` must hand the first index back.
+**Then `jpl_pools_swap()` is called**: its return must be `(before + 1) mod SPACES` and agree with
+the global, a handle kept from the interval just abandoned must read **dead while sitting below the
+current `next`** (design item (iii) of §6.7, and the probe fails if that case never arose — the
+rung measures the staleness, not just the code), an `alloc` before the rewind must be refused
+rather than serve the new interval's reserved index, `reset` on the abandoned interval must return
+**0** instead of wrapping its subtraction, the `origin` entry for that handle must read zero before
+anything copies through it and must round-trip a written handle afterwards, the second interval must
+then serve the *same* `cap` with `peak` still a per-region count rather than a doubled index, and
+the sweep must hand the single global back so the next pool is measured on the interval its own
+macros name — with `jpl_pools_space == 0u` asserted again in `main`, because one drifted pool is a
+finding about the runtime, not about that pool.  Every bound in it is one of the pool's own
+`JPL_POOL_*` / `JPL_<KIND>_*` macros, read out of the header, so the sweep and the allocator compare
+against one constant.  (3) The report's `RUNTIME SUMMARY` keys are then
 closed against each other, against the header and against the translation unit: a missing key is
 a failure and not a zero (the census's convention, inherited),
 `pools_with_capacity + pools_without_capacity == pools_declared`,
@@ -943,27 +977,66 @@ a failure and not a zero (the census's convention, inherited),
 `allocator_handles_defined_in_layout == allocators_emitted`,
 `runtime_names_colliding_with_prototypes == 0`, `runtime_cells_total` equal to the sum of the
 header's own macros, and the stems and macros in the report's table identical to the stems and
-macros the header declares — three readings of one registry.  The vendored pin count goes from
-two files to three: `sh_run_jpl.h`, `layout.txt`, `sh_run_jpl_pools.c`.
+macros the header declares — three readings of one registry.  Since ii-b-2b the interval arithmetic
+closes the same way: `runtime_cells_total == regions_per_pool × (space_cells_served_total +
+allocators_emitted)` (the index domain divides back into the artifact's own caps plus one reserved
+index each), `origin_indices_total == runtime_cells_total` with `origin_bytes_total == 4 ×` it and
+`static_bytes_total_with_origins` the sum of the two byte keys, `interval_arithmetics_checked ==
+allocators_emitted`, `interval_typedefs_emitted == 4 × allocators_emitted`, the header's own
+interval `#define`s counted against `interval_macros_emitted == 6 × allocators + 1`, and the
+indicator's assignments **counted in the file that defines it** — the definition plus exactly one
+writer, so "one global, one writer" is a measurement rather than a sentence.  The vendored pin
+count goes from two files to three: `sh_run_jpl.h`, `layout.txt`, `sh_run_jpl_pools.c`.
 
-*Measured* (5-B.3b-ii-b-1, over the same eight declared arrays and the same cap table): all
+*Measured* (the numbers below are the tree's, re-pinned when **ii-b-2b** landed; what
+5-B.3b-ii-b-1 first measured is the delta the paragraph names — and the counter figure below is
+**2b's**, since **ii-b-2c** took `counters_emitted` **32 → 59** and `mutable_globals_emitted`
+**33 → 68** while leaving every index, byte and origin figure here exactly as written, which is the
+cross-check that a copy layer moved no domain): all
 **8** pools are sized, so **8** allocators, **8** resets, **8** liveness checks and **32**
-counters are emitted, defining **80 644** cells and **34 866 192** bytes (**34 049.0 KiB**) of
-static storage; **0** pools are unsized, so §6.6's other half — a declared type with no capacity
+counters are emitted, over **80 660** indices and **34 868 416** bytes (**34 051.2 KiB**) of pool
+storage, plus **8** `origin` tables of the same **80 660** indices — **322 640** bytes — for a
+static price of **35 191 056** bytes, which is §6.7 paragraph 4's predicted total to the byte and
+**0.93 %** above §6.6's `2·cap` reading rather than the doubling a naive two-pool layout implies.
+**0** pools are unsized, so §6.6's other half — a declared type with no capacity
 gets no runtime — is a rule the gate holds in reserve rather than one it exercised here.  The
-sweep then reports, for every one of the eight: `served == C-1`, `refused == 4`, `peak == C-1`,
-and `0` assertion failures across all of them, with `jpl_pools_refusals() == 32` equalling the
-per-pool sum.  `runtime_names_colliding_with_prototypes == 0`, i.e. none of the **57**
-identifiers this slice adds — `_next`, `_peak`, `_taken`, `_refused`, `_alloc`, `_reset`,
-`_is_live` for each of the eight pools, plus the one exported sum — shadows a symbol of the
+sweep then reports, for every one of the eight: `cap` cells served in **each** interval
+(`33 286` allocations across the sweep for the slab, `258` for the narrowest cons-pair pool — the
+count spans both intervals plus the one reallocation phase 4 makes), `refused == 6`
+(the three attempts past each interval's bound, the one refusal demanded of an un-rewound region
+after the swap, and the attempt that ended each fill), `peak == cap` in both intervals — a
+per-region count, where the high-water index would have read roughly `2·cap` — **2** stale handles
+rejected while below the current `next`, and `0` assertion failures across all of them, with
+`jpl_pools_refusals() == 48` equalling the per-pool sum and `jpl_pools_space == 0u` both after each
+sweep and after all eight.  `runtime_names_colliding_with_prototypes == 0`, i.e. none of the
+identifiers the two slices add — `_next`, `_peak`, `_taken`, `_refused`, `_alloc`, `_reset`,
+`_is_live` and, since 2b, `_origin` for each of the eight pools, plus the one exported sum, the
+single `jpl_pools_space` and its one writer `jpl_pools_swap()` — shadows a symbol of the
 shipped closure, which is the check that lets §6.3's ABI header and this runtime share one
-translation unit.  The header
-grows **376 → 477** lines and the report grows a `POOL RUNTIME` table and a `RUNTIME SUMMARY`;
+translation unit.  **ii-b-2c re-measured the same key at 0** with its own names in the set —
+`_evac`, `_word_at`, `_word_put`, `_scan`, `_queue_start`, `_scan_one`, `_drain` per pool and the
+one `jpl_pools_evac_by_class` — which is the rung that says the collector layer can live in the same
+unit as the kernel's declarations.  The header
+grows **376 → 477 → 557 → 805 → 1176** lines and the pools TU **363 → 487 → 769 → 1834**, and the
+report carries the `POOL RUNTIME` table plus the interval keys in its `RUNTIME SUMMARY` (**25**
+after 2b, **38** since 2c's eleven collector keys);
 no §6.3, §6.4 or §6.5 count moved, and 2f's census still reads eight declared pools from the
-same grep.  The rung's teeth were checked the same way the earlier ones were: one character of
-the emitted comparison (`next < C` → `next <= C`) produced five distinct failures on the word
-pool and exited non-zero, and the mutation was reverted before the evidence was re-pinned.
-Every `peak` attributable to the *kernel* is still **0**, because no kernel body calls an
+same grep — 2b put its two intervals *inside* one array's index domain, so the name count is
+unchanged, which is the property §6.7 paragraph 4 claimed and the grep confirms.
+The rung's teeth were re-checked for this slice by mutating each of the following in turn, each
+reverted before the next: reading `is_live` as §6.6 did (`h > CUR_BASE` → `h > 0u`, which is the same
+test since `JPL_NIL` is 0) left every other number identical and produced **16** probe failures — the
+two stale-handle assertions on all eight pools — and exited non-zero, which is what says the pair is
+the slice's rung rather than its arithmetic; sizing the array as `SPACES × cap` made the emitted
+`jpl_check_<s>_two_regions` and
+`_regions_tile_the_array` typedefs refuse the header at compile time, which is the case for having
+the relations in C rather than in prose; giving one registration site the old `2·cap` literal fired
+the emitter's own `INTERVAL REFUSED` before any file was written; and a second assignment to the
+indicator (measured directly: the TU's assignment count goes **2 → 3** against the rung's `1 +
+space_globals_emitted`), and a dropped `JPL_<KIND>_LO_BASE`, each moved exactly the count that was supposed to
+notice.  Because some of those mutate the *shipped* emitter, they were run against a scratch mirror of
+`verify/c/` that reproduced a green control run first — the guard on `jpl_emit.ml` is right to
+refuse an in-tree weakening of a landed invariant.  Every `peak` attributable to the *kernel* is still **0**, because no kernel body calls an
 allocator yet — the number above is the sweep driving the runtime to its bound, which is exactly
 the distinction §6.6's "instrument, not the number" paragraph was written to keep.
 
@@ -1120,10 +1193,28 @@ space is `0` and `cap+1`, both of which are `JPL_NIL` for their own region.
 The honest price of the whole slice is then computable rather than guessed: `+2` cells per pool
 (**16** cells = 2·(1028 + 12 + 16 + 8 + 8 + 12 + 20 + 8) = **2 224 B**, dominated by the two word
 cells), the eight `origin` arrays at 4 B per index (**322 640 B** over the new 80 660 indices),
-and the counters that go from one `next` per pool to an allocation pointer and a scan pointer per
-space.  The static total moves from §6.6's **34 866 192 B / 80 644 cells** to about
+and **which interval is current**, which is one value rather than one per pool: every pool of the
+graph moves together at a step boundary, so eight independent flags would be eight chances to
+disagree about a fact that has one cause.  The emitted runtime therefore gains exactly one mutable
+global, `jpl_pools_space`, and exactly one writer of it, `jpl_pools_swap()`; `jpl_<stem>_next` stays
+a single pointer per pool but becomes an **absolute** index interpreted against the current
+interval, `reset` rewinds it to that interval's own base instead of to `1u`, and `peak` becomes the
+widest a *region* served — a count, no longer an index — because decision 4's quantity is cells, not
+positions in one big array.  The **scan pointer is deliberately absent from this slice**: it is the
+to-space's queue, so it belongs to the evacuation that advances it (ii-b-2c), and emitting a counter
+nothing writes yet would be the invention §6.2 refuses.  What 2b does emit beside the intervals is
+the `origin` array per pool, sized by the same index domain, zero-initialised — and zero is already
+the right initial value, because `JPL_NIL` means "not copied from anywhere" — while stale origins in
+the interval that becomes the to-space are never read, since evacuation writes an entry before the
+scan reads it, which is §6.6's no-clearing argument repeated for a second array.  **That argument
+reaches the scan's back-pointer read only: the other question an evacuation asks — has this
+from-space cell *already* been copied — is a read before any write, and paragraph 5bis discharges
+it with four comparisons rather than with this sentence.**  The static total moves from §6.6's
+**34 866 192 B / 80 644 cells** to about
 **35 191 056 B / 34 366.3 KiB / 80 660 cells** — an increase of **0.93 %**, not the doubling a
-naive "two pools" reading of §6.1 would produce.  These are predictions this section makes so the
+naive "two pools" reading of §6.1 would produce.  (The space indicator is one `jpl_ref` for the
+whole runtime and the swap is one function for the whole runtime, precisely because neither is per
+pool.)  These are predictions this section makes so the
 gate can refute them: the numbers the slice lands are the report's, and a mismatch is a finding
 about the arithmetic here, not a licence to edit the report.
 Handles stay **absolute** across the split, which buys two things: the origin table is one array
@@ -1132,6 +1223,33 @@ swap, a handle in the *other* interval is outside the current space entirely, so
 it without a liveness analysis.  That is §6.6's recorded aliasing debt discharged: the danger was
 a handle below the current `next` naming a cell that got reused, and with two intervals a reused
 cell sits in a different interval from the handle that refers to it.
+
+*Measured* (5-B.3b-ii-b-2b; §6.6's *Measured* paragraph carries the sweep's numbers, so this one
+carries the arithmetic's): every one of paragraph 4's predictions held to the byte.  The registered
+capacity became `2·cap + 2` = `SPACES·(cap+1)`, so the eight pools go from **80 644** indices to
+**80 660** — exactly **+16**, the two reserved zeros per pool — and the pool storage from
+**34 866 192 B** to **34 868 416 B**, i.e. **+2 224 B** = 2·(Σ of the eight cells' byte widths),
+dominated by the slab's 2×1 028 — which is the 2·(the caps' sum) this paragraph computes rather
+than the near-doubling a "two arrays" reading implies.  One space serves
+**40 322** cells summed over the pools, and the identity the gate asserts for it closes:
+`40 322 + 8 == 80 660 / 2` — the eight are the reserved bases, which is the off-by-one this
+paragraph exists to make visible.  `interval_arithmetics_checked == allocators_emitted == 8`,
+**49** interval macros (six per pool plus `JPL_POOL_SPACES`), **32** `jpl_check_*` typedefs — four
+per pool, so the tiling, the per-space cap and the origin domain are each a compile-time relation in
+the file that declares the array — and **1** `jpl_check_pools_flip_cycles_the_intervals` pinning
+`SPACES` against the swap's own cycle length.  The `origin` domain is the index domain
+(`origin_indices_total == runtime_cells_total == 80 660`), which is what makes it safe to size by
+`JPL_POOL_<KIND>` rather than by a second, drifting expression; its **322 640 B** are the 4 B per
+index this paragraph predicted, and the static total is **35 191 056 B / 34 366.3 KiB**, **+0.93 %**
+over §6.6.  The indicator is **one** global with **one** writer, measured by counting assignments in
+the file that defines it — 2, the definition and `jpl_pools_swap()` — not by a sentence here.  And
+what 2b did *not* touch is also measured: the edge layer still reads 8 tables / 26 rows / 358
+classes / 45 EDGE words, because a word's class is a property of its cell's type and not of the
+array that holds it, and §6.7's whole argument for splitting the table from the space depends on
+those two counts moving independently.  The two slices share one name only: `origin` was the array
+ii-b-2c had to write, and nothing wrote it until 2c landed — `alloc` now clears the cell it hands out
+and `evac` writes the pair of entries 5bis's fourth arm reads, which is the *Measured* paragraph
+below, not this sentence.
 
 **5. The algorithm: Cheney-style evacuation, because R4 forbids the recursive one.**  The
 textbook stop-and-copy `evacuate` is recursive over the node graph, and R4 is a hard no.
@@ -1143,12 +1261,274 @@ allocation pointer.  Each cell is copied at most once, so sharing is preserved �
 property §6.1 said a functional program needs — and the total work per boundary is linear in the
 cells actually reachable, with two nested *bounded* loops (pools × slots), satisfying R3.  One
 requirement this places on the cell layout: the scan must know, for a to-space cell, which
-from-space cell it was copied from, so its children are read from the right place.  The nodes
+from-space cell it was copied from, so its children are read from the right place.  **This
+sentence was written before the primitive existed, and half of it is the wrong half:** a to-space
+cell's children are *already in the copy*, which is what the whole-cell copy means — the scan reads
+them from the to-cell and they name from-space cells until the scan forwards them, so no origin is
+needed to find them.  What the parallel array is genuinely needed for is the other direction, the
+one `is_live` cannot answer: a from-space handle asking whether it has a copy this round, and the
+mutual arm of paragraph 5bis's test that says so.  The nodes
 have no spare word (`cmd` uses all 3 slots at `If`, `frame` all 4 at `FForRest`), so the origin
 goes in a **parallel array**: `jpl_ref jpl_<s>_origin[…]`, 4 B per index, sized and intervalled
-exactly as paragraph 4 sizes the pool it describes.
+exactly as paragraph 4 sizes the pool it describes — and paragraph 5bis uses that one array for
+both directions, because the interval an index sits in fixes which role its entry has.
 (The rejected alternative, an explicit worklist, adds a queue entry per cell *and* needs the
 same origin information, so it costs more for a shape R3 would then have to bound separately.)
+
+**5bis. The evacuation of one cell, and the four comparisons that make an origin entry mean *this
+round* (the ii-b-2c contract).**  Paragraph 5 states the algorithm; this paragraph states the
+primitive it is built from, because four of its choices are not free.
+
+*The boundary goes swap-then-rewind, and that order is what makes the allocator reusable.*  A
+collector that copies "into the other interval" needs an allocator for the other interval, and §6.6
+emitted exactly one allocator per pool, bound against `CUR_BASE`/`CUR_TOP`.  Rather than a second
+family of to-space allocators — a second model of the same bound, which is the drift §6.6's derived
+naming rule exists to prevent — the boundary flips the indicator *first*: `jpl_pools_swap()`, then
+`jpl_<s>_reset()` for every pool, whose rewind now lands on the to interval and, per ii-b-2b's
+measured transient, returns **0** because `next` still names the region being abandoned.  After
+those two calls `CUR_*` *is* the to-space: `jpl_<s>_alloc` copies into it unchanged, `is_live`
+judges the copies live and the abandoned originals dead, and `peak` — the placeholder paragraph 6
+says decision 4 needs — becomes the number of cells a boundary evacuated rather than the width of a
+region a test happened to fill.  The consequence is worth naming: the from region's frontier stops
+being tracked at that instant, because there is one `next` per pool and the rewind gave it to the to
+region.  Nothing in paragraph 5 needs it — the queue walks the to region, and a from-space cell is
+read by absolute index, which is the one thing handles have always been.
+
+*The copy is one C statement; the word accessors are where the table meets the struct.*  R7's cells
+are structs whose members are all `jpl_nat`/`jpl_ref`, one `uint32_t` each, and ii-b-2a emitted
+`jpl_check_<stem>_edge_covers_the_cell` pinning `NPOS * 4u == sizeof (cell)` — which is the
+compile-time proof that no member is padded.  So the copy is the structure assignment
+`jpl_<s>_pool[t] = jpl_<s>_pool[h]`: C99, no pointer, no cast, no strict-aliasing question, and the
+tree stays as pointer-free as §6.2 left it.  Rewriting one *word* of that cell does need an
+index-to-field mapping, and the only sound source for it is the same recorded positions that
+produced the classes, so per pool the emitter derives
+`jpl_ref jpl_<s>_word_at(jpl_ref h, jpl_ref i)` and `void jpl_<s>_word_put(jpl_ref h, jpl_ref i,
+jpl_ref v)`
+as straight-line `if`-chains over that pool's own `NPOS` words: dotted paths where R3 put an
+aggregate inline (`pair_text_text_list`'s element is `…_hd.p_fst`, `…_hd.p_snd`, then `…_next`),
+named slot fields for a node (`cmd_slot0…2`, `frame_slot0…3`), and one array arm for the slab
+(`wt_code[i - 1u]`, its element being a single word).  **No arm is a bare `else`,** and that is a
+soundness choice rather than a style one: a chain whose last arm caught everything would answer the
+*last member's* value for an index that has no member, so every arm tests its own index and a read
+past the cell's last word falls through to the initialiser `JPL_NIL` — the empty list, which already
+means "no child" and is the least-wrong answer a collector can give for a word that does not exist.
+Coverage is enforced where the arms are built, not where they are printed: the emitter refuses if a
+cell's registered members do not reach its `NPOS` words, if an array member is not the cell's
+*trailing* words (only a trailing one can be addressed by the scan's own index), if a member's word
+count disagrees with the paths its by-value type expands to, or if a member wider than one word
+carries no type to split it — so "the chain covers the cell" is arithmetic in the file that generated
+it plus the typedef ii-b-2a already emits, not a comment.  The array arm's upper bound is
+`i < JPL_<stem>_NPOS`, the macro the table is dimensioned by, so the chain and the table cannot
+disagree about where the cell ends.  Two rejected alternatives: casting `&pool[h]` to `jpl_ref *`, whose legality rests on
+6.7.2.1p15 plus the very no-padding typedef this file is checking (a circularity the project does
+not need, and it would be the first pointer in the tree); and a union overlay, which re-declares the
+pool arrays, so 2e's forty layout checks and 2f's declared-pool grep would describe an object that
+no longer exists.
+
+*Forwarding, and why four arms and not three.*  `evac(h)` must answer two references to one cell
+with one copy (paragraph 5's sharing property), so it asks "has `h` been copied *this* round?" — a
+read before any write.  An entry is a this-round forwarding pointer exactly when
+`o = origin[h]` is non-nil, **and** `o > CUR_BASE`, **and** `o < jpl_<s>_next`, **and**
+`origin[o] == h`.
+The first two arms say `o` names an index of the current (to) interval.  The third says that
+interval has *reached* `o`: `next` only moves up from `CUR_BASE + 1u`, and every index below it was
+written by this round, so an entry pointing at or above the frontier is residue and gets overwritten
+by this round's copy.  The fourth is the mutual arm: an index below the frontier is occupied by a
+cell this round copied from some handle, and `origin` at that index names that handle, so
+equal-to-`h` is exactly "this is `h`'s copy".  That third arm carries a debt it cannot pay by
+itself, and the trace that shows it is two rounds deep.  In round 1 a from-cell `h` is copied to `t`
+and both entries are written: `origin[h] = t`, `origin[t] = h`.  In round 2 the intervals have
+traded roles, `evac` is called on `t`, and it reads `o = origin[t] = h` — an index of the *current*
+interval.  While the frontier has not reached `h` the third arm rejects and `t` is copied correctly;
+once it has passed `h` — and it must, because round 2's copies land in the indices the earlier rounds
+filled — all four arms hold, because `origin[h]` still names `t` from round 1 and nothing rewrote it.
+`evac` would then return `h`: a cell whose words name the *other* interval's children, in a region
+being overwritten one cell at a time.  So the third arm is only true if the entries below the
+frontier *mean this round*, and the emitter makes that true the cheapest available way:
+`jpl_<s>_alloc` sets `origin[h] = JPL_NIL` for the cell it hands out, one store on the path that
+already moves three counters.  With it, an index below `next` has an origin this round wrote — nil if
+nothing has been copied into it, its source otherwise — and since a cell is evacuated at most once
+per round its destination's entry is written once, which is exactly the fact the mutual arm reads.
+Why three arms are not enough: the from region *is*
+the previous round's to region, so every cell in it that was evacuated or merely reused carries an
+entry pointing into the current to interval — a two-interval scheme has no round whose from region is
+clean of forward-looking entries, and a membership-plus-nonzero test would hand a parent its child's
+*old* index as if it were new, which is a live cell in the abandoned region that nothing rewrites.
+The two rejected alternatives are a generation stamp (a third parallel array, 4 B per index more,
+for a fact the intervals already carry) and clearing the from region's entries in a pass over the
+region at each boundary (correct, and refused for §6.6's reason: a loop whose cost is paid even when
+nothing is shared — and it would walk the interval the collector is about to abandon, which is the
+wrong half anyway).  What was adopted is the same fact charged to the work actually done: the clear
+sits inside `alloc`, so a boundary that copies three cells clears three entries and a boundary that
+shares one cell clears none beyond its copy.  One array, two roles, disambiguated by the interval an
+index sits in and by the frontier that made the entries below it: that is the third thing
+paragraph 4's split buys, after `is_live` and the reserved-zero arithmetic.  One guard precedes all
+of it: `h` must name a cell of the region the boundary reads *from* (`OTHER_BASE < h < OTHER_TOP`),
+and a handle outside it is refused and counted rather than copied — which also settles the case 5bis
+would otherwise have to wave through, a caller handing `evac` a cell that is already in the
+to-space: it is not a from-region handle, so it is refused instead of producing a copy of a copy.
+`evac(JPL_NIL)` is `JPL_NIL` and increments nothing — the empty list is not a cell.
+
+*The scan step reads the table, never the model.*  `jpl_<s>_scan_one(void)` takes the cell at
+`scan`, derives its row (`jpl_<s>_word_at(scan, 0u)` read as a tag where the pool is tagged, `0u`
+where it is not), and walks that row's `NPOS` classes: SCALAR does nothing (the value came with the
+copy), UNUSED does nothing (the word was never written), and an EDGE word is replaced by the copy of
+the handle it holds — `word_put(scan, i, jpl_pools_evac_by_class(cls, word_at(scan, i)))`.  The
+dispatch is **one** function for the whole runtime with exactly one arm per id in the registry's
+target set (**8** today, and the emitted `jpl_check_dispatch_arms_cover_every_target` pins the last
+arm's id against `JPL_EDGE_TO_…` so the chain cannot silently cover a prefix of the domain) and a
+final `else` that increments one runtime counter and returns the handle unchanged.  That branch is
+impossible by construction — table and chain come from the same `edge_pool_ids ()` reading in the
+same run — and it is still emitted, counted and asserted zero, because the alternative to measuring
+an impossible case is trusting a sentence about it; and returning the handle unchanged is the *least*
+wrong action, since the word then names a cell in the abandoned interval, `is_live` rejects it, and
+the failure surfaces as a dead handle instead of a cell that looks live.  A tagged pool's row index
+is guarded the same way: a tag at or above `NROWS` increments `jpl_<s>_badtag` and the scan stops
+without rewriting any word, because a row the table does not have has no classes to trust, and
+walking slots as if they were scalar is precisely the hard-coded edge this section's rule forbids.
+
+*The fixpoint, and why it terminates.*  `jpl_<s>_queue_start(void)` sets `scan` to `CUR_BASE + 1u` —
+an empty queue, the same expression `reset` rewinds `next` to; `jpl_<s>_drain(void)` is
+`while (jpl_<s>_scan < jpl_<s>_next) scan_one();`.  Each step advances `scan` by one and only the
+allocator moves `next`, so the loop is bounded by the cells the to region holds and every cell is
+scanned at most once: R3's bounded loop, no counter of its own.  R4 holds because the call graph is
+one-directional — `drain → scan_one → evac_by_class → evac(t) → alloc(t)` — and no `evac` reaches a
+`scan`.  A pool's drain is a fixpoint *over that pool*: scanning pool P can copy into pool Q and move
+Q's `next` ahead of Q's `scan`, so the loop over all eight pools belongs to 2d's `jpl_collect()` and
+is deliberately not emitted here.
+
+*What the new counters mean.*  Per pool, `copied` counts fresh copies, `forwarded` counts evacuate
+calls answered by an existing copy — the sharing hits, and the only quantity that distinguishes a
+correct copy from one that copies everything — `badtag` counts a tag with no row, and `badref`
+counts a handle outside the region the boundary is reading from.  The runtime gains one global,
+`jpl_pools_unclassified`, for the impossible class.  Three refusal counters, three distinct bugs: a
+table that lost a constructor, a root list that named a cell in the wrong interval, and a class id
+the dispatch does not reach — collapsing them into one "collector errors" counter would report that
+something is wrong while hiding which of the three it is.  §6.6's four counters keep counting
+allocator *events*, so the copies a boundary makes are included: `taken` counts cells served, and
+`peak` is now the widest region any pool reached, which after this slice is the live set plus
+whatever the program allocated into it — the quantity decision 4 asked for, still measured rather
+than derived.  Every new counter saturates at `JPL_REF_TOP` and none is ever rewound, exactly like
+§6.6's.
+
+**Predictions 2c makes so the gate can refute them.**  The index domain does not move, because the
+second role of `origin` costs no storage: `runtime_cells_total` and `origin_indices_total` stay
+**80 660**, and `static_bytes_total_with_origins` stays **35 191 056 B**.  What the slice adds is
+mutable state only: **40** new globals — 8 scan pointers and 32 counters (four per pool: `copied`,
+`forwarded`, `badtag`, `badref`), all `jpl_ref`-wide = **+160 B**, taking all mutable runtime storage
+from 33 globals / 132 B to **74 / 296 B**.  *(Refuted in five places, and the refutation is §6.2's
+own rule: `badtag` is a counter nothing would write in the six untagged pools, so it is emitted only
+for the two node pools — **35** new globals and **68 / 272 B** total, not 40 and 74 / 296.  The
+*Measured* paragraph records it as a prediction that failed rather than editing the prediction.)*  `interval_macros_emitted` goes **49 → 65** (two per
+pool, `JPL_<KIND>_OTHER_BASE` and `JPL_<KIND>_OTHER_TOP` — *other*, not *to*, because after the swap
+the to-space is what `CUR_*` already names, so the second pair exists to bound the region the
+boundary reads *from*, and a body that wrote `SPACE + …` would be a second model of arithmetic those
+macros own); `counters_emitted` goes **32 → 64** (**59** actually, for the same `badtag` reason); and
+the new keys are `scan_pointers_emitted` **8**, `evac_functions_emitted` **8**,
+`evac_forward_arms_checked` **8**, `queue_start_functions_emitted` **8**,
+`scan_step_functions_emitted` **8**, `drain_functions_emitted` **8**, `word_accessors_emitted`
+**16**, `tag_guards_emitted` **2** (the two node pools), `dispatch_functions_emitted` **1**,
+`dispatch_arms_emitted` **8** — which must equal `edge_target_pools`, and is the cross-check that
+says the chain covers the domain the table can name — plus `origin_clears_emitted` **8**, the one
+store per allocator that the third arm of the forwarding test depends on: it is counted in the
+generated file rather than trusted here, because a collector whose sharing test silently stops
+believing the frontier is a corruption, not a wrong count.  What must *not* move is measured too:
+`allocators_emitted` stays **8** (that is the swap-first boundary's whole point), every
+EDGE SUMMARY key stays at 8 tables / 26 rows / 358 classes / 286 + 27 + 45 / 2 flattened / residual
+0, 2f's declared-pool grep stays at **eight** pools, the four rendered bodies stay byte-identical,
+and the runner stays at **17** rungs because 2c's check lives inside `verify/c/jpl_emit.sh`, which
+goes from eight checks to nine.
+
+*Measured* (5-B.3b-ii-b-2c; the storage predictions above, the drive that reads them, and the three
+mutations that say the drive has teeth).  The domain did not move: `runtime_cells_total` and
+`origin_indices_total` are **80 660**, `static_bytes_total_with_origins` **35 191 056 B**, and
+`interval_macros_emitted` is **65** — 49 plus the two `OTHER_*` bounds per pool, exactly as
+predicted, including the *other*-not-*to* naming.  The mutable state prediction was the one the
+slice refuted: **35** new globals rather than 40, because §6.2's rule (no counter nothing writes)
+is what the `tag_guards_emitted` key exists to record, so `badtag` is emitted for the two node pools
+only.  The account closes on itself: `counters_emitted` **32 → 59** = 8 `copied` + 8 `forwarded` + 8
+`badref` + **2** `badtag` + 1 `unclassified`, and `mutable_globals_emitted` **33 → 68** = those 59
+plus the 8 scan pointers plus the space indicator, i.e. **272 B / 0.3 KiB** instead of the predicted
+296 — a measured runtime still costing less than one cell of the word slab.  Every other new key
+landed where it was predicted: `evac_functions_emitted` = `evac_forward_arms_checked` =
+`queue_start_functions_emitted` = `scan_step_functions_emitted` = `drain_functions_emitted` =
+`scan_pointers_emitted` = `origin_clears_emitted` = **8** each, `word_accessors_emitted` **16**,
+`tag_guards_emitted` **2**, `dispatch_functions_emitted` **1**, `dispatch_arms_emitted` **8** — and
+that last equality is with `edge_target_pools`, so the chain is checked against the domain the table
+can name rather than against a number typed here.  What must not move did not: `allocators_emitted`
+**8** (the swap-first boundary's whole point, and now a *measured* one — the drive's second round
+calls `alloc` and the copies land on the current `next`), all EDGE SUMMARY keys at 8 tables / 26 rows
+/ 358 classes / 286 + 27 + 45 / 2 flattened / residual 0, 2f's declared-pool grep at **eight**, the
+four rendered bodies byte-identical, and the runner at **17** rungs because this check lives inside
+`verify/c/jpl_emit.sh`, which is now nine checks with the vendored-evidence re-pin **deferred** to
+after the ninth so that `JPL_REGEN=1` cannot pin evidence the drive has not approved.
+
+**The tag guards are now read three independent ways.**  The header's `JPL_<KIND>_NROWS > 1` count
+(derived by awk from the emitted `#define`s), the report's `tag_guards_emitted`, and the number of
+`badtag` arms in the generated TU must all be **2**; a second reading of the first two already existed
+as check 7's row/arity cross-check, and the third is new.  The same awk path derives the drive's
+*shape*: for every pool it finds the word of the cell whose edge class names **that same pool**,
+recording the column as `word = col % NPOS` and the row as `col / NPOS`, and refuses if a table's
+`NPOS`/`NROWS` are missing.  Six pools have such a word — `pair_text_text_list` (word 2 of row 0),
+**`cmd` (word 1 of row 3, the `Seq` constructor)**, `text_list` (1 of 0), `cmd_list` (1 of 0),
+`pair_text_list_cmd_list_list` (2 of 0), `frame_list` (1 of 0) — and two do not (`word`, `frame`).
+*That set is a correction, not a quotation*: this section first said `cmd` had no self edge, which was
+read from the node pool's tag rows rather than from the table, and the derivation found
+`Seq (cmd, cmd)` in row 3.  No capacity, index, word or row number is written in the shell script, so
+a pool that gains or loses a self edge changes the probe's size without anyone editing a literal.  For
+a tagged pool the derived row index is also the value written into word 0, so each of those chains
+measures `scan_one`'s tag→row arithmetic on the way to measuring the copy.
+
+**The drive, and what one chain of three cells proves.**  For each self-edge pool the generated probe
+builds `a → b`, `c → b` in the low interval (every one of the cell's `NPOS` words nilled first, then
+word `iw` set to the child's handle, then the self-edge word set to `b`), crosses the boundary in the
+runtime's own order — `swap`, `reset`, `queue_start`, `evac` the roots, `drain` — and crosses it back.
+Round 1 requires `copied` **+3**, `forwarded` **+1** (the second parent must hit the mutual arm: this
+is the same quantity 2e's cross-pool probe is meant to distinguish, measured per pool where no root
+list is needed), the copy of `b` at `HI_BASE + 3u`, both parents' self edges rewritten to it, the whole
+cell structurally equal to its source word by word, `scan == next` at the fixpoint, `next == HI_BASE +
+4u` and `peak == 3u`.  Round 2 is where 5bis's third arm is actually tested: `origin[a]` still names
+last round's `ta`, so the probe asserts the stale entry is *present*, then calls `alloc` and asserts
+the index it hands back has `origin == JPL_NIL` — "alloc handed out a cell whose origin still names
+LAST round's copy", the failure message M1 prints — then asserts that `evac(ta)` **copies** rather
+than forwards (`copied` **+4**, `forwarded` unmoved, destination ≠ the fresh `f`), and that the drain
+fixes the copy's edge to the current interval.  Every chain answers `copies 5 forwarded 1 badref 3
+taken 9 peak 3`, six times, with 0 assertion failures overall.  The `badref` three are the domain
+guard: a handle in the *current* interval (a copy of a copy), `JPL_<KIND>_OTHER_BASE` (the reserved
+zero of the region being read from), and `JPL_POOL_<KIND>` (one past the array) — **18** refusals in
+total, each with `next` unmoved, and `evac(JPL_NIL)` incrementing nothing.  The two tagged pools each
+get a second test in which words 1..`NPOS`-1 hold distinct non-nil values that *would* be evacuated:
+a garbage tag (`NROWS + 5`) must stop the scan with `badtag` **+1** and leave **4** (`cmd`) and **5**
+(`frame`) of those words exactly as written, the whole cell otherwise untouched — a tautology if the
+words were zeros, which is why they are not.  `jpl_pools_unclassified` is asserted zero per chain, per
+tag test, and once for the whole run.
+
+**Three mutations, all run in a scratch mirror, none of them in the tree.**  Deleting `alloc`'s origin
+clear (M1) moves one report key — `origin_clears_emitted` **8 → 0** — and produces **78** probe
+failures, six chains' worth of the round-2 assertions plus the clear's own.  Weakening the mutual arm
+to the frontier test it already passes (M2, `origin[o] == h` → `o < next`, arity-preserving so the C
+compiles and no tautology warning fires) moves **no** `RUNTIME SUMMARY` key and produces the same
+**78** failures, all of them the stale-forwarding case.  Rewiring one dispatch arm's class macro so
+`text_list`'s edges evacuate through `frame` (M3) also moves **no** summary key — the arm count, the
+table and the header all stay consistent — and produces **24** failures with `unclassified` reaching
+**10**, which is the impossible branch turning out not to be impossible.  The strongest claim this
+supports is the honest one: **two of the three bugs a collector can have here are invisible to every
+count in the report**, and the drive is the only rung that sees them.  All three were reverted before
+the evidence was re-pinned, and the classifier that rightly refuses to weaken a landed invariant in
+`jpl_emit.ml` is the reason they were run on a copy.
+
+**Honest limits after 2c.**  (i) With one `next` per pool, the `reset()` that follows a `swap()`
+returns **0** — the guard `(next > CUR_BASE) && (next <= CUR_TOP)` fails because `next` still names
+the interval being abandoned, which is 5bis's "the from region's frontier stops being tracked at that
+instant" seen from the other side.  Cells are still freed; the quantity "cells returned by this reset"
+is only meaningful when a reset does not cross a boundary, which is the case check 5 drives.  (ii)
+`peak` in this tree is still **0** for every kernel-attributable run: the drive's `peak 3` is the
+probe's, and the first caller that would move a pool's peak inside the C kernel is ii-b-2d's
+`jpl_collect()`.  (iii) The chains are one-pool-deep-by-construction: the dispatch is crossed, since a
+self edge is routed through `evac_by_class`, but a chain that visits three *different* pools is design
+item (ii)'s cross-pool case and waits on ii-b-2e.  (iv) No root list, no `jpl_collect()`, no loop over
+pools, and no `BLimit` — `evac` on a full to interval returns `JPL_NIL` and the refused copy is
+counted, fatal only in 2d.
 
 **6. Overflow is `BLimit`, not a guess.**  Decision 4 said no walk over the artifact's text can
 produce the live-set bound, and this slice does not produce one.  What it changes is what happens
@@ -1165,9 +1545,21 @@ to that stage rather than being asserted here.
 §6.4's `OWED-REPRESENTATION` rows wait on the copy rule *and* on §6.3's schema for their
 allocation sites, so the 13 rows unlock with ii-b-3/4, not here.  `release` stays absent: with a
 collector, per-cell free is redundant, and shipping one would reintroduce the exact rule this
-section derives.  Cell *clearing* stays absent for §6.6's reason.  And no reachability claim is
-made about the four rendered bodies: they allocate nothing, so they sit outside this slice
-entirely, which the gate checks byte-for-byte.
+section derives.  No *per-boundary* clearing pass is emitted, for §6.6's reason, and 5bis keeps that
+promise for `origin` too: the one store that exists is the allocator clearing the cell it hands out,
+which is charged to a copy rather than to a region.  And no
+reachability claim is made about the four rendered bodies: they allocate nothing, so they sit outside
+this slice entirely, which the gate checks byte-for-byte.  **2c's own edge of this list** is the
+boundary: it emits no root list, no `jpl_collect()`, and no loop over pools, because those are the
+composition 2d owns and a primitive that also chose the composition would be two changes in one
+slice.  It likewise does not decide what an overflow *means*: when the to interval is full, `evac`
+returns `JPL_NIL`, the parent's word becomes `JPL_NIL`, and the `refused` counter §6.6 already
+emitted is what records it — counted here, fatal only in 2d, where the boundary can answer with the
+model's own `BLimit`.  Two honest limits follow from the same scope.  `evac`'s domain is
+from-space handles: 2d's roots guarantee that, and calling it on a to-space handle would copy a
+copy — wasteful, never corrupt, and not something 2c can be tested for without the roots that do not
+exist yet.  And `copied`/`forwarded` are cumulative like `taken`, so they measure a boundary only by
+its delta, which is how 2e's probe will read them.
 
 **Slices.**  The work is ordered so that every rung's refusal is a *class* refusal before it is
 a collector bug:
@@ -1175,8 +1567,8 @@ a collector bug:
 | slice | content | refuses | unlocks |
 |---|---|---|---|
 | ii-b-2a | **the derived edge table**, **landed** as `jpl_<stem>_edge[]` in `sh_run_jpl.h` + `sh_run_jpl_pools.c`: one class per **word** of every sized pool's cell — SCALAR / EDGE(stem) / UNUSED — computed from the positions the layout rules recorded while emitting the structs, published under `JPL_<stem>_NPOS/NROWS/NEDGE`, with `NPOS × 4 == sizeof (cell)` pinned by a `jpl_check_*` typedef per pool | a position whose type resolves to no declared pool; a by-value aggregate whose words mean something only *under a tag* (option, `bres`, fat variant) inline in a cell; a row wider than its cell; an array field whose element size does not divide the words its row leaves; an untagged row that does not fill its cell; a pool registered without a shape | the collector's data dependency; and it re-measures R7 and R3, since the header's slot comments, the flattened-aggregate count and the table must agree |
-| ii-b-2b | **the two intervals**: per pool, the capacity becoming `2·cap + 2`, the from/to index bounds derived from it, the `origin` array, and `is_live` re-expressed as "in the current interval and below the current allocation pointer" | an index that belongs to neither interval or to both; a pool whose cell element size makes the new total exceed the counter's own top (a `jpl_check_*` typedef, not a runtime test) | the swap; and it is the rung that proves §6.6's aliasing debt is a *comparison*, not an analysis |
-| ii-b-2c | **evacuate one cell**: copy by slot class per the table, forward through `origin`, scan to fixpoint over one pool | a slot class not in the table (a `default:` that guesses) | the multi-pool walk |
+| ii-b-2b | **the two intervals**, **landed** as the arithmetic paragraph 4 predicts: per pool `JPL_<KIND>_CAP/_SPACE/_LO_BASE/_HI_BASE/_CUR_BASE/_CUR_TOP` (dimension `SPACES·(cap+1) = 2·cap+2`, each space reserving its own index 0), four `jpl_check_*` typedefs per pool pinning that the regions tile the array and that one region serves exactly the artifact's `cap`, one `jpl_<stem>_origin[]` over the whole index domain, `jpl_<stem>_next` read as an absolute index against the current interval, `is_live` re-expressed as "in the current interval and below the current allocation pointer", `reset` rewinding to `CUR_BASE + 1u` with `peak` a per-region count — and **the swap itself**: one `jpl_pools_space` global for the whole runtime with exactly one writer, `jpl_pools_swap()` | an index that belongs to neither interval or to both; intervals that do not tile the array; a per-space bound that does not serve exactly the artifact's `cap` (the off-by-one paragraph 4 names); a pool whose new total exceeds the counter's own top (a `jpl_check_*` typedef, not a runtime test); a second writer of the space indicator | ii-b-2c's evacuation, which needs a place to copy into and an origin to write; and it is the rung that proves §6.6's aliasing debt is a *comparison*, not an analysis, because a handle from the previous interval now reads dead **while sitting below the current `next`** — the case a `h < next` test cannot distinguish |
+| ii-b-2c | **evacuate one cell**, **landed** as 5bis specifies it: the swap-then-rewind order, so §6.6's one allocator per pool *is* the to-space allocator (`allocators_emitted` still **8**) and `origin` finally has writers; the whole-cell structure assignment; `jpl_<s>_evac` with the four-arm forwarding test, its third arm made true by the **8** clears `alloc` does; `jpl_<s>_word_at`/`_word_put` chains with **no bare `else`** (**16** accessors, coverage enforced where the arms are built rather than in a comment); one `jpl_pools_evac_by_class` over the whole target-id domain (**8** arms == `edge_target_pools`, plus `unclassified` asserted zero); the to-space scan pointer with `queue_start`/`scan_one`/`drain` reaching a fixpoint *over one pool*; `copied`/`forwarded`/`badref` per pool and `badtag` for the **2** tagged ones — and, beside the counts, a **generated drive**: six self-edge chains, the edge word derived per pool by awk from the emitted tables, crossed over two boundaries | a slot class the dispatch does not name (an `else` that counts and leaves the word alone rather than guessing); a tag with no row (a scan that stops instead of walking slots as scalar); an origin entry that points into the to interval but above the frontier, or below it while naming a different origin (the stale-forwarding case three arms would accept); an allocator that hands a cell out without clearing its origin entry, which is what makes the third arm mean *this round*; a handle outside the region the boundary reads *from* (`badref`, which is also the answer to a copy of a copy); a pointer or a cast entering the tree — *and three of these six are now measured rather than asserted: two of the mutations that produce them move no report key at all, and only the drive sees them* | the multi-pool walk, and `peak` becoming the live-set quantity decision 4 asked for |
 | ii-b-2d | **the roots and the boundary**: derived root list for `cfg`/`out`, `jpl_collect()` = evacuate roots + drain every pool's scan + swap intervals, saturating to `BLimit` on any to-space overflow | a root field that is not a declared pool edge; a `collect` that returns success with a pool's scan pointer behind its allocation pointer | the first reclamation that is legal rather than merely available |
 | ii-b-2e | **the gate**: a generated probe that builds a known graph in one region, collects, and asserts survivors, sharing (two parents, one survivor), stale-handle rejection, and that an overflow path returns `BLimit` — plus the SUMMARY identities closing the table against the header | any count in the report that the header's `#define`s and the probe's assertions do not independently agree with | JPL.7's differential, which is where a wrong live-set bound becomes visible |
 
@@ -1194,17 +1586,42 @@ because it is the tag, and an UNUSED word is **trailing** because a hole in the 
 what a "width minus the tail" reading would walk past.  (ii) `collect` must be
 driven, not read: a probe that allocates a graph with *known* sharing and asserts the survivor
 count is the only way to distinguish a correct copy from one that copies everything (both fit in
-the space at these capacities, so no bound catches it).  (iii) Staleness must be asserted
-positively: a handle from the previous interval must read dead, and the same value below the
-current allocation pointer must read live, in the same run — the direction that a single-number
-summary cannot lie about.
+the space at these capacities, so no bound catches it).  **The single-pool half of (ii) belongs to
+2c, not to 2e**: one cell per pool evacuated through the primitive, one chain of its own pool's
+cells driven to its fixpoint, and one child referenced twice so `forwarded` must answer 1 while
+`copied` answers 3 — which is the same distinction (ii) names, measured where no root list is
+needed to make it.  **Landed with 2c**, and it answered as written: every one of the six self-edge
+chains reports `copies 5 forwarded 1 taken 9` across *two* boundaries — round 1 copies three cells and
+forwards once, round 2 copies two more (`evac` of the root copy, then the drain's fix-up of that copy's
+edge) while `forwarded` stays at **1**, and the 9 allocations are the chain's own three cells, those
+five copies, and the one `alloc` whose cleared origin is what makes round 2 copy instead of forward.
+So the sharing hit and the fresh-copy count are separate quantities in the report and in the probe.  (iii) Staleness must be asserted
+positively: a handle from the previous interval must read dead, and a cell of the *current*
+interval below the current allocation pointer must read live, in the same run — the direction that a
+single-number summary cannot lie about.  **(ii) waits on ii-b-2e's probe for its cross-pool case; the
+per-pool case landed with ii-b-2c; (iii) landed with ii-b-2b**, because it is
+the swap, not the copy, that makes the two directions differ: while one interval is the only region,
+`h < next` and "in the current interval and below `next`" answer identically, so the rung with teeth
+is the one that allocates below the pointer *and* across the base.  That is what check 5's sweep now
+does per pool: it takes one handle in the low interval, swaps, and asserts *both* `low_h < next`
+(counted in `stale_below`) and `is_live(low_h) == JPL_FALSE` (counted in `stale_dead`), then requires
+the two counters to be **equal and non-zero** — a probe that never reached the interesting case would
+otherwise pass it silently.  The same handle is re-asserted dead a second time in the high interval,
+after that region's own `next` has grown past it, which is the rung a one-interval reading of
+`is_live` cannot pass: reverting the comparison to §6.6's `h != JPL_NIL` changed no report key, no
+table, and no other assertion, and produced **16** probe failures — two per pool — before exiting
+non-zero.
 
-**Next slice.**  ii-b-2b, the two intervals.  ii-b-2a landed the table, so "live" now has a
-referent — 45 EDGE words the collector is told to follow — and what remains before a cell can be
-copied is the space to copy it *into*: paragraph 4's `2·cap + 2`, the per-space bounds derived from
-it, the `origin` array, and `is_live` re-expressed as a comparison against an interval.  Until that
-exists the tables describe a reachability relation no C can act on, which is the honest reading of
-this slice: it is a data dependency, not a collector.
+**Next slice.**  ii-b-2d, the roots and the boundary.  ii-b-2a landed the table, ii-b-2b the space a
+copy goes *into*, and **ii-b-2c the move itself**: a word's class read from the table, a SCALAR coming
+with the whole-cell copy, an EDGE turned into a to-space handle through `origin`, and the scan pointer
+that `queue_start` starts at `CUR_BASE + 1u` and `drain` advances to a fixpoint over one pool — so the
+sentence this section used to close with, "45 EDGE words and two regions, with no C that reads one from
+the other", is no longer true: 45 EDGE words now have a reader, and it is measured across two
+boundaries.  What is still true is that **nothing calls it**: there is no root list for `cfg`/`out`, no
+`jpl_collect()` that evacuates roots, drains all eight pools and swaps, and no `BLimit` on the overflow
+path — those three are ii-b-2d, and until it lands no kernel step reclaims anything, so every
+kernel-attributable `peak` in this tree is still the 0 the report prints.
 
 ## 7. Verification: JPL lint gate (design)
 
@@ -1278,8 +1695,10 @@ recursive set.  `verify/c/closure.txt` is now the authoritative inventory.]* = *
 | 5-B.3b-ii-a · #42 | **The first C bodies, and the census that decides which bodies may be written at all.**  5-B.3b-i answered "what does this function's *interface* cost in C"; the bodies need a second, independent question (§6.4): does this body need a **pool, an allocator, or a function value**?  The stage's load-bearing choice is that the answer is **not a classification rule written next to the emitter** — §6.4's licensed scalar set is implemented once, as a renderer, and *run as a trial* over all 47 members, so a verdict is one of the renderer's own runs in its own words and the census cannot claim a body renderable that the emitter then could not write.  A body the trial accepts becomes a definition in `sh_run_jpl_bodies.c`; a refusal becomes a row naming the construct, the pooled type, or the §6.3 schema that stopped it, and the six verdicts are asserted to **partition** the closure rather than describe part of it | `verify/c/jpl_lower.ml` §8c–§8d (`base_verdict`, `pools_of`, `render_e`/`render_def`, `print_render` as a fixpoint, `write_bodies`, `write_diff_c`/`write_diff_ml` + 11 new SUMMARY keys), `verify/c/jpl_ast.ml` §9 (`c_fn`, `c_upper`, `data_macro`, `cap_data`, `cap_macro_of_data`, `is_cap_data` — the C *spelling* rules lifted out of the emitter so 2e's `#define`s, the census's prototypes and the renderer's citations are one rule), `verify/c/jpl_emit.ml` (its hand-typed seven-name `cap_bindings` list replaced by `cap_macro_of_data`, i.e. by the artifact's own cap table), `verify/c/jpl_lower.sh` checks 5–8, vendored `verify/c/sh_run_jpl_bodies.c` (49 lines) + `verify/c/jpl_bodies_diff.c` (20) + `verify/c/jpl_bodies_diff.ml` (14) — **DONE (2026-10-05)**.  *Evidence*: gate stays **17/17** — no new `verify_models.sh` rung was needed, because 2f's own script grew from six checks to eight.  `lowering.txt` **507 → 659 lines**, SUMMARY **24 → 35 keys**; `jpl_lower.ml` 2043 → 2667, `jpl_lower.sh` 330 → 558.  **The measured partition: 11 `DATA` + 2 `ALIAS` + 4 `RENDER` + 13 `OWED-REPRESENTATION` + 15 `OWED-SCHEMA` + 2 `OWED-CONSTRUCT` = 47, `render_unaccounted = 0`.**  The four rendered bodies are `bstat`, `is_digit`, `is_alpha`, `is_name`, two of them citing a data constant by its header macro (`JPL_C_B_0`, `JPL_C_B_USCORE`), and every one of the 11 `DATA` names resolves as a `#define` in `sh_run_jpl.h` — the cross-rung direction that keeps a missing constant from first appearing in JPL.7's host.  *The trial is a fixpoint, and one body proves why*: `is_name` cites a `DATA` macro **and** calls `is_alpha`/`is_digit`, so it is undecided until its callees are verdicted — a callee still waiting leaves the caller undecided rather than refused.  *The differential*: both drivers are **generated from the same RENDER rows** that wrote the bodies file, so no hand adds a call to one side; each is built (the C under 2e's flags minus `-fsyntax-only`, the OCaml against the vendored extraction) and run over `0 … MAX_FUEL` — **136 450 lines each, `cmp` identical**, `bodies_swept_exhaustive = 4 / diagonal = 0` because every rendered body takes exactly one `nat`, and the transcript's swept fields take **5** distinct values, which is the rung's guard against a pair of constant transcripts agreeing for free.  Line counts are checked against the report's own `sweep_domain`, so neither driver picks the range it tests.  *Why the compile rung and the differential are not redundant*: a renderer can emit C that compiles and computes something else; only the sweep says which.  *The refactor's own check, to 5-B.2c's standard*: the naming rules moved into the shared reader and the emitter's cap list became derived from the artifact, and 2d and 2e were re-run requiring `closure.txt`, `layout.txt` and `sh_run_jpl.h` to stay **byte-identical** — they do, so "one reading, three consumers" is measured rather than claimed.  *Side finding, with an owner*: `ALIAS` rows `jpl_add`/`jpl_mul` have a prototype in 2e's header and no definition anywhere, because their body IS a C operator — either 2e drops those prototypes or JPL.6's lint forbids calling them by name; the census prints it as a finding, not a failure.  *What it does NOT close*: 43 members still have no body (15 on §6.3's loop schema = 5-B.3b-ii-b, 13 on decision 3's step-boundary copying and `MAX_STACK`'s depth guard, 2 on a named construct), nothing here touches headroom 2 because a scalar body allocates nothing, and `branch_guardb`/`forallb`'s model-side specialisation stays owed from 5-B.3b-i.  See §6.4 and the HISTORY entry |
 | 5-B.3b-ii-b-0 · #41 | **The second debt: every owed row is now read twice.**  §6.4's rules stop at the first match, so an `OWED-SCHEMA` row never printed the pools its signature takes or returns — and 5-B.3b-ii's slice order turns on exactly that overlap, because a `while` whose operands are pool handles is not writable until the pool half exists.  The stage is a **measurement with no licence attached**: the same `pool_of` reading the renderability trial consults, asked of all 47 members and printed as two debt columns beside the one verdict, changing no verdict and emitting no C.  "No pool" must carry a **reason** — scalar / type-variable / behind-a-declared-type's-fields — because a zero without a reason is precisely the licence §6.5 refuses; and the type-variable family is cross-checked against §6.3's **closed instances**, since `sh_run_jpl_abi.h` may already have decided the cell this walk cannot see | `verify/c/jpl_lower.ml` §9e (`sight`, `sight_of`, `opaque_ty`, `shape_debt`, `instance_pools`, `print_debts` + 9 new SUMMARY keys), `verify/c/jpl_lower.sh` check 5 (five identities, one inequality, the slice finding), `verify/models/JPL.md` §6.5 — **DONE (2026-10-05)**.  *Evidence*: gate stays **17/17** and `jpl_lower.sh` stays at eight checks; `lowering.txt` **659 → 783 lines**, SUMMARY **35 → 44 keys**, and **not one verdict count moved** (11 + 2 + 4 + 13 + 15 + 2 = 47), which is the check that this section measured instead of re-classifying.  **Measured: 10 of the 15 §6.3-shape rows also carry the representation debt; all 5 remaining rows are pool-free only because a position is still a type variable; 0 are pool-free in the plain scalar sense; and 4 of those 5 are POOLED at a closed instance** (`length`, `rev`, `rev_append`, `forallb` — only `app` is never closed in the shipped closure).  `owed_construct_also_pool = 0` (the §6.4 rule order *holding*, not an accident), `dual_debt_rows = 10`, refused-rows-touching-a-pool = **23** = 10 + 0 + 13 (asserted), `debt_unaccounted = 0`.  **The consequence belongs to the plan, not the tool: a loop form landed alone would render zero bodies**, so ii-b-1/ii-b-2 (allocator, handles, step-boundary copying) come before ii-b-3/ii-b-4 (the loop forms) — which is what §6.5's slice table now states as measured rather than as preference.  *Honest limit*: the walk stops at a declared record or variant, so every pool-free count is a **FLOOR** — `isz` sits behind `cstate` and `step_c` behind `cfg`/`out`, and the same boundary is why 2e's `jpl_frame_pool` is declared while nothing demands it.  Entering record fields would move rows between §6.4's verdicts, so it is a slice of its own.  See §6.5 and the HISTORY entry |
 | 5-B.3b-ii-b-1 · #41 | **The pool runtime: how a cell comes to exist.**  Up to here the header declared eight `extern` arrays and a comment promised "definitions live in the emitted translation unit" — a translation unit that did not exist, so a handle in `sh_run_jpl.h` named nothing.  The stage's load-bearing choice is **reclamation at region granularity, not a free list**: a per-cell `release(h)` is only safe once a rule says which handles still reach a cell, and that rule is ii-b-2's, so freeing per cell here would be the same kind of invention §6.2 refuses.  A region boundary *is* decision 3's step boundary, which makes the design honest about what it cannot do yet — and it makes the quantity decision 4 said no text walk could produce **measurable** rather than assumed: `_peak` records the widest point any one region reached.  Every name is derived from the registry that sizes the pool (stem → `JPL_POOL_<KIND>` → `_next/_peak/_taken/_refused` + `_alloc/_reset/_is_live`), so a pool cannot gain a capacity without an allocator or an allocator without a return type the layout defined | `verify/c/jpl_emit.ml` (`pool.p_handle` as the registry's missing column, `pool_stem`/`pool_macro`/`sized_pools`/`runtime_names`, `runtime_decl`/`runtime_section`, `pool_definition`/`pools_c_text`, 13 new SUMMARY keys + three refusals that exit 1), `verify/c/jpl_emit.sh` checks 3, 5 and 6 (compile the TU, sweep it at its bound, close its accounting), vendored `verify/c/sh_run_jpl_pools.c` (363 lines, new) — **DONE (2026-10-05)**.  *Evidence*: gate stays **17/17** — no new `verify_models.sh` rung, because 2e's script grew from four checks to seven.  `sh_run_jpl.h` **376 → 477** lines; the emitted pools TU compiles under `-std=c99 -Wconversion -Wsign-conversion -Werror` **without** `-fsyntax-only`, which is the first time a definition of a mutable static in this tree has been through a compiler at all.  **Measured: 8 pools sized ⇒ 8 allocators, 8 resets, 8 liveness checks, 32 counters, 80 644 cells, 34 866 192 bytes of static storage, 0 unsized pools, 0 name collisions with the closure's 47 symbols.**  The bounds sweep — generated from the header's own `_alloc(void);` lines, so it carries no capacity number either — reports for every pool `served == C-1`, `refused == 4`, `peak == C-1`, `0` assertion failures, and `jpl_pools_refusals() == 32` equal to the per-pool sum; `2f`'s census still reads **eight** declared pools from the same grep, and all five of its artifacts stayed byte-identical.  *The rung has teeth*: mutating one emitted comparison (`next < C` → `next <= C`) produced five distinct failures on the word pool and exited non-zero, and the mutation was reverted before the evidence was re-pinned.  *Design debt recorded rather than hidden*: a `reset` does **not** clear cells (clearing at every boundary would price the step by the pool, not the data, and no lemma requires zero bytes), `is_live` catches only a handle carried across a rewind — the aliasing a handle below the current `next` can still produce is exactly what ii-b-2's copy rule must forbid — and **every `peak` attributable to the kernel is still 0**, because no body calls an allocator yet.  *What it does NOT close*: no body rendered (§6.4's four stand alone and unchanged), no extent measured for a real run, headroom 2 untested, and the 13 `OWED-REPRESENTATION` rows stay owed because a cell existing is not a body being allowed to return one.  See §6.6 and the HISTORY entry |
-| 5-B.3b-ii-b-2a · #41 | **The edge table: which word of a cell is an edge.**  §6.6 made a cell exist and R7 made every one of its slots the same `uint32_t`, so "reachable from the roots" was a phrase with no referent: a handle and a `nat` are one word, and only the `.mli` knows which is which.  The stage's load-bearing choice is **one class per WORD, not per declared field**, because R3 keeps a list's element inline — `jpl_pair_text_text_list_cell` is 12 B of three words with three different meanings, so a per-field table would need a *second* table saying how a field splits, which is §2's forbidden second model of one artifact.  Flattening instead makes the cell's own arithmetic the table's: `NPOS × 4 == sizeof (cell)` is emitted per pool as a `jpl_check_*` typedef, so the compiler says a row covers the struct it describes.  A position that resolves to no declared pool, a row wider than its cell, **an array field whose element does not divide the words its row leaves** (the word slab's codes: the count comes from the cell's width, so if it does not divide, this reading did not walk the whole cell), **an untagged row that does not fill its cell**, a pool registered without a shape, and **a by-value aggregate whose words mean something only under a tag** (option, `bres`, fat variant) are emitter refusals, not classes: a collector that forwarded a stale payload word — or that never scanned a word at all — frees a live cell, so guessing is worse than stopping | `verify/c/jpl_emit.ml` (§6c: `edge_class`/`edge_pool_ids`/`edge_class_macro`/`edge_target`/`edge_cell_words`/`edge_expand`/`edge_classes_of`/`edge_row`/`edge_tables`/`edge_decl`/`edge_definition`/`edge_section`, the `edge_defs_b` buffer, `runtime_names` extended so a table cannot shadow a closure symbol, 10 `EDGE SUMMARY` keys + six edge-layer refusal sites that exit 1), `verify/c/jpl_emit.sh` **check 7** (three awk readings — `edges_from_tags.awk`, `edges_from_table.awk`, `ctors_from_mli.awk` — the per-stem loop and the key identities; 784 lines, checks seven → eight), vendored `verify/c/sh_run_jpl.h` **477 → 557** lines and `sh_run_jpl_pools.c` **363 → 487**, `layout.txt` 185 with 31 of them the edge blocks — **DONE (2026-10-05)**.  *Evidence*: gate **17/17**, exit 0, with no new `verify_models.sh` rung; the header and the pools TU still compile under D7's full flag set, and 2f's census still reads **eight** declared pools from its own `jpl_…_pool[` grep with all five of its artifacts byte-identical.  **Measured: 8 tables / 26 rows / 358 word classes = 286 SCALAR + 27 UNUSED + 45 EDGE, partition residual 0; `cmd` 11×4 = 12/12/20, `frame` 9×5 = 17/15/13, three cons cells at 0/0/2, two pair cons cells at 0/0/3, the word slab 1×257 all-scalar, now derived rather than excepted (`P_leaf L_nat`: the cell's 257 words less its length word, in groups of the element's one word, so the row is the struct's own array and its scan copies the cell in full and follows nothing); 8 edge targets == 8 declared pools, both directions; `edge_aggregates_flattened = 2`.**  *The flattened count is derived, not quoted*: the gate counts the pools whose cell is named `jpl_pair_*`, requires each of those to be 3 words wide and every other non-node pool not to be, so the number follows from the type layer's own cell names instead of from a literal someone maintains.  *The rung has teeth, twice, by two different readings*: retagging a node row's first word as an edge (`P_tag → [E_edge "cmd"]`) left checks 1–6 green and the C still compiling — the table was well-formed, in the cell's width, and self-consistent with the report — while check 7 produced **20** `TAGWORD` failures and exit 1; reclassifying padding as SCALAR (`E_unused → E_scalar`) moved every report key together with the file, kept the partition closed, and was caught because the `.mli`'s arities predict `cmd` 12 and `frame` 15 UNUSED words against a measured 0.  Both mutations were reverted before the evidence was re-pinned.  *What it does NOT close*: this is a data dependency, not a collector — no `origin` array, no two intervals, the registered capacities are still §6.6's `2·cap`, nothing reads a table yet, and no reachability claim is made about any body.  The emitter's six edge-layer refusals have **no rung that fires them** at these roots (a `.mli` that put an `option` inline in a pooled cell would), so the refusal code is read, not measured; the two collector-side rungs §6.7's verification design calls (ii) and (iii) wait on ii-b-2b/2e.  See §6.7 and the HISTORY entry |
-| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2, re-pinned by 5-B.2b and 5-B.2c) is gated green as `sh_run_jpl.h`, and the capacity that half was waiting on landed as 5-B.2b; the lowering half (5-B.3: the tail loops → `while`, the bounded structural recursions → copy loops, R8's monomorphization census — the loop/recursion split quoted here as "6 + 9" is 5-B.1's estimate, and 5-B.3a **re-measured** it as 7 fuel loops + 3 structural tail loops + 5 folds with no `while` at any budget) is **measured, declared, and now rendered wherever a body can exist at all**: the census is gated as block 2f, R8's closed set is gated as the `sh_run_jpl_abi.h` declaration layer (5-B.3b-i), and §6.4's renderability trial is gated together with the four scalar-leaf bodies and their exhaustive C-vs-kernel differential (5-B.3b-ii-a), leaving **5-B.3b-ii-b-2b..6 — decision 3's step-boundary copying (the edge table half of it is done), the two loop forms, `MAX_STACK's depth guard and the 5 model-side fold rewrites** as what remains; ii-b-0, the dual-debt measurement that fixed that order, landed first and changed no verdict, ii-b-1 landed the runtime that makes a cell exist, and ii-b-2a landed the table that says which of its words are edges.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate**, 5-B.3a lowering census, 5-B.3b-i ABI declarations, 5-B.3b-ii-a scalar-leaf bodies + their exhaustive differential, 5-B.3b-ii-b-0 the dual-debt columns, 5-B.3b-ii-b-1 the pool runtime, 5-B.3b-ii-b-2a the derived edge tables |
+| 5-B.3b-ii-b-2a · #41 | **The edge table: which word of a cell is an edge.**  §6.6 made a cell exist and R7 made every one of its slots the same `uint32_t`, so "reachable from the roots" was a phrase with no referent: a handle and a `nat` are one word, and only the `.mli` knows which is which.  The stage's load-bearing choice is **one class per WORD, not per declared field**, because R3 keeps a list's element inline — `jpl_pair_text_text_list_cell` is 12 B of three words with three different meanings, so a per-field table would need a *second* table saying how a field splits, which is §2's forbidden second model of one artifact.  Flattening instead makes the cell's own arithmetic the table's: `NPOS × 4 == sizeof (cell)` is emitted per pool as a `jpl_check_*` typedef, so the compiler says a row covers the struct it describes.  A position that resolves to no declared pool, a row wider than its cell, **an array field whose element does not divide the words its row leaves** (the word slab's codes: the count comes from the cell's width, so if it does not divide, this reading did not walk the whole cell), **an untagged row that does not fill its cell**, a pool registered without a shape, and **a by-value aggregate whose words mean something only under a tag** (option, `bres`, fat variant) are emitter refusals, not classes: a collector that forwarded a stale payload word — or that never scanned a word at all — frees a live cell, so guessing is worse than stopping | `verify/c/jpl_emit.ml` (§6c: `edge_class`/`edge_pool_ids`/`edge_class_macro`/`edge_target`/`edge_cell_words`/`edge_expand`/`edge_classes_of`/`edge_row`/`edge_tables`/`edge_decl`/`edge_definition`/`edge_section`, the `edge_defs_b` buffer, `runtime_names` extended so a table cannot shadow a closure symbol, 10 `EDGE SUMMARY` keys + six edge-layer refusal sites that exit 1), `verify/c/jpl_emit.sh` **check 7** (three awk readings — `edges_from_tags.awk`, `edges_from_table.awk`, `ctors_from_mli.awk` — the per-stem loop and the key identities; 784 lines, checks seven → eight), vendored `verify/c/sh_run_jpl.h` **477 → 557** lines and `sh_run_jpl_pools.c` **363 → 487**, `layout.txt` 185 with 31 of them the edge blocks — **DONE (2026-10-05)**.  *Evidence*: gate **17/17**, exit 0, with no new `verify_models.sh` rung; the header and the pools TU still compile under D7's full flag set, and 2f's census still reads **eight** declared pools from its own `jpl_…_pool[` grep with all five of its artifacts byte-identical.  **Measured: 8 tables / 26 rows / 358 word classes = 286 SCALAR + 27 UNUSED + 45 EDGE, partition residual 0; `cmd` 11×4 = 12/12/20, `frame` 9×5 = 17/15/13, three cons cells at 0/0/2, two pair cons cells at 0/0/3, the word slab 1×257 all-scalar, now derived rather than excepted (`P_leaf L_nat`: the cell's 257 words less its length word, in groups of the element's one word, so the row is the struct's own array and its scan copies the cell in full and follows nothing); 8 edge targets == 8 declared pools, both directions; `edge_aggregates_flattened = 2`.**  *The flattened count is derived, not quoted*: the gate counts the pools whose cell is named `jpl_pair_*`, requires each of those to be 3 words wide and every other non-node pool not to be, so the number follows from the type layer's own cell names instead of from a literal someone maintains.  *The rung has teeth, twice, by two different readings*: retagging a node row's first word as an edge (`P_tag → [E_edge "cmd"]`) left checks 1–6 green and the C still compiling — the table was well-formed, in the cell's width, and self-consistent with the report — while check 7 produced **20** `TAGWORD` failures and exit 1; reclassifying padding as SCALAR (`E_unused → E_scalar`) moved every report key together with the file, kept the partition closed, and was caught because the `.mli`'s arities predict `cmd` 12 and `frame` 15 UNUSED words against a measured 0.  Both mutations were reverted before the evidence was re-pinned.  *What it does NOT close*: this is a data dependency, not a collector — no `origin` array, no two intervals, the registered capacities are still §6.6's `2·cap` (all three of those closed by **ii-b-2b**, the next row), nothing reads a table yet, and no reachability claim is made about any body.  The emitter's six edge-layer refusals have **no rung that fires them** at these roots (a `.mli` that put an `option` inline in a pooled cell would), so the refusal code is read, not measured; of the two collector-side rungs §6.7's verification design calls, (iii) landed with ii-b-2b and (ii) waits on ii-b-2e's probe.  See §6.7 and the HISTORY entry |
+| 5-B.3b-ii-b-2b · #41 | **The two intervals: a place to copy into, and the comparison that makes staleness decidable.**  After 2a the runtime could say *which words of a cell are edges* but not *where a copy would go*: §6.6's array was one region with a reserved index 0, so a collector had no to-space, no origin to forward through, and — the part that turns out to be load-bearing — `is_live` had no test that a one-region reading could not fake.  The stage's load-bearing choices are three.  **One array, two intervals**: the dimension becomes `SPACES·(cap+1)` = `2·cap+2`, each space reserving its own index 0, because §6.6's "a pool of `C` indices serves `C-1`" is a *per-region* law and a capacity of `2·cap` would therefore have served `cap-1` live cells — one less than the artifact's cap, surfacing at runtime as a `BLimit` the model does not produce.  **One indicator for the whole graph**: `jpl_pools_space` is a single global with a single writer `jpl_pools_swap()`, not eight per-pool flags, because every pool moves together at a step boundary and eight independent flags are eight chances to disagree about a fact with one cause.  **Handles stay absolute**, which is what buys the origin table its domain and staleness its one comparison. The scan pointer is deliberately *not* emitted here — it is the to-space's queue, so it belongs to the evacuation that advances it | `verify/c/jpl_emit.ml` (the interval arithmetic as derived macros `JPL_<KIND>_CAP/_SPACE/_LO_BASE/_HI_BASE/_CUR_BASE/_CUR_TOP`, four `jpl_check_*` typedefs per pool, `origin[]` per pool over the index domain, `next` as an absolute index read against `CUR_BASE/CUR_TOP`, `is_live` as the three-bound test, `reset` rewinding to the current base with a two-sided guard, `peak` as a per-region count, `jpl_pools_space` + `jpl_pools_swap` + its flip-cycle typedef, the `INTERVAL REFUSED` sites, 12 new `RUNTIME SUMMARY` keys), `verify/c/jpl_emit.sh` (**check 5**'s sweep rewritten to four phases over **both** intervals — 6 interval macros per pool now re-derived from the header, the `stale_below == stale_dead` pair, the `returned == 0`/`next == HI_BASE+1` transient rungs and the `sizeof(origin)` domain rung, and two probe-wide rungs — `sizeof (jpl_ref) == 4`, and the indicator back at `0u` after **all eight** sweeps, which is what makes one global a claim about the whole runtime rather than about each pool; **check 6**'s interval identities including the one-writer count taken from the file that defines the global, so its `RUNTIME SUMMARY` key set goes **13 → 25**); vendored `sh_run_jpl.h` **557 → 805**, `sh_run_jpl_pools.c` **487 → 769**, `layout.txt` → 217 — **DONE (2026-10-06)**.  *Evidence*: gate **17/17**, exit 0, with **no new `verify_models.sh` rung** (2e's script stayed at eight checks).  **Measured: 80 660 indices (+16 — two reserved bases per pool), pool storage 34 868 416 B (+2 224 = 2·Σ cell widths), 8 origins of the same 80 660 indices = 322 640 B, static total 35 191 056 B = 34 366.3 KiB = +0.93 % over §6.6 — paragraph 4's predictions, to the byte; 40 322 cells served by ONE space, with `40 322 + 8 == 80 660 / 2` the off-by-one made visible; 49 interval macros, 32 per-pool typedefs + 1 flip typedef, `space_globals_emitted == swap_functions_emitted == 1`, and the indicator's assignments counted in the TU at 2 = definition + writer.**  The sweep drives every pool through both regions: `served == cap` per interval, `next == CUR_TOP` at each bound, `refused == 6`, `peak == cap` in **both** intervals (a per-region count — the high-water index would have read ≈`2·cap`), a swap that returns `(before+1) % SPACES`, an un-rewound region that **refuses** rather than serving its own reserved nil, and a `reset` of an abandoned interval that returns **0** instead of wrapping.  0 assertion failures across all eight, `jpl_pools_space == 0u` after every sweep and after all eight.  *The rung has teeth, and each mutation was reverted before the next*: reading `is_live` as §6.6 did (`h > CUR_BASE` → `h > 0u`, the same test since `JPL_NIL` is 0) left **every report key identical** and produced **16** probe failures — the stale-below-`next` assertion in both intervals of all eight pools — and exited non-zero; `SPACES × cap` made two of the emitted typedefs refuse the header at compile time; a stale `2·cap` literal at one registration site fired the emitter's own `INTERVAL REFUSED` before any file was written; and a second assignment to the indicator (the TU's assignment count measured going **2 → 3** against the rung's `1 + space_globals_emitted`), and a dropped `JPL_<KIND>_LO_BASE`, each moved exactly the count meant to notice.  Because some of those mutations edit the shipped emitter, they ran in a **scratch mirror** of `verify/c/`, which reproduced a green control run first — the classifier that guards `jpl_emit.ml` is right to refuse a weakening of a landed invariant.  *What it does NOT close*: still no collector — `origin` is written by nothing, the scan pointer does not exist yet (§6.7 design item (ii)'s driven probe is ii-b-2e's), no kernel body calls an allocator so every *kernel-attributable* `peak` is still 0, and the four rendered bodies are untouched (byte-checked).  *(The first two clauses are what **ii-b-2c**, the next row, closed: `alloc` now clears the cell it hands out and `evac` writes the pair of `origin` entries the forwarding test reads, and the scan pointer exists and is advanced by `queue_start`/`scan_one`/`drain`.  The third and fourth are still exactly as this row states them — no kernel body calls an allocator, and the driven cross-pool probe is still ii-b-2e's.)*  See §6.7 and the HISTORY entry |
+| 5-B.3b-ii-b-2c · #41 | **The evacuation of one cell, the scan that walks what was copied, and the two collector bugs no report key can see.**  After 2b the runtime had a to-space, an `origin`, and a staleness test, but nothing that moved a cell into them: the 45 EDGE words had no reader, so "reachable from the roots" was still a relation over a table no C consulted.  The stage's four load-bearing choices are §6.7 ¶5bis's.  **Swap, then rewind** — `jpl_pools_swap()` before `reset()`, which makes §6.6's one allocator per pool *be* the to-space allocator instead of adding a second one (`allocators_emitted` stays **8**).  **The copy is the whole-cell structure assignment**, not a word-by-word rebuild: R7 made every cell a struct of `jpl_nat`, so a copy that split it would need a second description of the same layout.  **No arm of a word chain is a bare `else`** — a catch-all would answer the *last member's* value for an index that has no member, so `word_at(h, i)` outside the cell returns `JPL_NIL` (which already means "no child") and `word_put(h, i)` with such an index writes nothing; coverage is enforced where the arms are built — six emitter refusals plus 2a's `NPOS·4 == sizeof (cell)` typedef — not where they are printed.  **Four forwarding arms, and an `alloc` that clears `origin[h]`**, which is what makes the third arm mean *this round* rather than *ever*.  The scan pointer lands here because this is the slice that advances it | `verify/c/jpl_emit.ml` §6d (`word_arm`, `word_paths`, `cell_arms`, `arm_test`/`arm_slot`/`arm_chain`, `word_at_definition`, `word_put_definition`, `evac_definition`, `queue_start_definition`, `scan_one_definition`, `drain_definition`, `dispatch_definition`; 11 new `RUNTIME SUMMARY` keys, six word-chain refusals that exit 1), `verify/c/jpl_emit.sh` **check 9** — a drive whose *shape is derived*, since awk reads each pool's own edge-table row, finds the word whose class names that same pool, and refuses a pool with no self edge or a chain that cannot be built — plus **check 6**'s three accounting identities (`counters = 7·allocators + tag_guards + 1`, `mutable = counters + scan_pointers + space_globals`, and that total against the declarations counted in the TU, `bytes = 4·mutable`) and the vendored-evidence re-pin **moved behind check 9**, so the files compared are files the drive ran against; vendored `sh_run_jpl.h` **805 → 1176**, `sh_run_jpl_pools.c` **769 → 1834**, `layout.txt` **217 → 235** — **DONE (2026-10-06)**.  *Evidence*: gate **17/17**, exit 0, still with **no new `verify_models.sh` rung** (2e's script went **eight → nine** checks).  **Measured: 80 660 indices and 35 191 056 B of static storage, 65 interval/edge macros — the domain is unmoved, which is what a copy layer should leave it.**  `counters_emitted` **32 → 59** = 8 copied + 8 forwarded + 8 badref + **2** badtag + 1 unclassified, `mutable_globals_emitted` **33 → 68** = 59 counters + 8 scan pointers + the space indicator = **272 B / 0.3 KiB**; ¶5bis predicted 40 new globals / 74 total / 296 B / `counters 64`, and was **refuted in five places by §6.2's own rule** — `badtag` is a counter nothing would write in the six untagged pools — which is the reason predictions are written down.  `allocators_emitted` still **8** and every `EDGE SUMMARY` key unmoved; `RUNTIME SUMMARY` now **38** keys; header compile-time assertions **86 → 87**, the new one being `jpl_check_dispatch_arms_cover_every_target` (eight dispatch arms + the unclassified default == the whole EDGE target set).  **The drive**: six self-edge chains — `pair_text_text_list`, `cmd`, `text_list`, `cmd_list`, `pair_text_list_cmd_list_list`, `frame_list` — each reporting `copies 5 forwarded 1 badref 3 taken 9 peak 3` across **two** boundaries, the two tagged pools each taking exactly **1** garbage tag into `badtag` while leaving **4** (`cmd`) / **5** (`frame`) payload words exactly as written, **18** out-of-region references refused without moving a frontier, `unclassified = 0`, **0** assertion failures.  *The rung has teeth, and two of its three teeth are invisible to accounting*: **M1** (dropping the `origin[o] == h` arm from the forwarding test) gave **78** drive failures and moved exactly one report key, `origin_clears_emitted` **8 → 0**; **M2** (a bare `else` closing a word chain) gave **78** failures and moved **no** summary key at all; **M3** (the dispatch's unclassified arm incrementing nothing) gave **24** failures, `unclassified = 10`, and again **no** key.  All three ran in a scratch mirror of `verify/c/`, none in the tree, because mutating the shipped emitter is what the classifier refuses.  *What it does NOT close*: the swap still has **no caller**, so no kernel rewinds at a boundary and "cells returned" remains meaningful only within a region; forwarding is proven **per pool**, never across pools, so §6.7 design item (ii)'s graph with *known* sharing stays ii-b-2e's; `jpl_collect()` and the model's `BLimit` are ii-b-2d's; and no Coq theorem moved — the model still has no store, so the behavioural claims stay #26/#27.  See §6.7 ¶5bis and the HISTORY entry |
+| JPL.5 · #25 | Tail-loop OCaml → JPL-C99 **emitter** (pure layout only: `list`→array+len, `nat`→`uint32`) | *emitter input `sh_run_c.ml` → output `.c`* — **un-blocked, and now half-built: the layout half (5-B.2, re-pinned by 5-B.2b and 5-B.2c) is gated green as `sh_run_jpl.h`, and the capacity that half was waiting on landed as 5-B.2b; the lowering half (5-B.3: the tail loops → `while`, the bounded structural recursions → copy loops, R8's monomorphization census — the loop/recursion split quoted here as "6 + 9" is 5-B.1's estimate, and 5-B.3a **re-measured** it as 7 fuel loops + 3 structural tail loops + 5 folds with no `while` at any budget) is **measured, declared, and now rendered wherever a body can exist at all**: the census is gated as block 2f, R8's closed set is gated as the `sh_run_jpl_abi.h` declaration layer (5-B.3b-i), and §6.4's renderability trial is gated together with the four scalar-leaf bodies and their exhaustive C-vs-kernel differential (5-B.3b-ii-a), leaving **5-B.3b-ii-b-2d..6 — decision 3's step-boundary copying (its edge table, its two intervals and the evacuation of one cell are done; the roots and `collect`, and the driven cross-pool collector probe are not), the two loop forms, `MAX_STACK's depth guard and the 5 model-side fold rewrites** as what remains; ii-b-0, the dual-debt measurement that fixed that order, landed first and changed no verdict, ii-b-1 landed the runtime that makes a cell exist, ii-b-2a landed the table that says which of its words are edges, ii-b-2b landed the space a copy goes into, and ii-b-2c landed the copy, the forwarding and the scan that walks it.**  5-A.5 settings + artifact, 5-A.6 kernel wired onto the proved loops, 5-A.7 no mutual fixpoint left, 5-B.1 typed closure + subset gate, **5-B.2 representation header + differential cap gate**, 5-B.3a lowering census, 5-B.3b-i ABI declarations, 5-B.3b-ii-a scalar-leaf bodies + their exhaustive differential, 5-B.3b-ii-b-0 the dual-debt columns, 5-B.3b-ii-b-1 the pool runtime, 5-B.3b-ii-b-2a the derived edge tables, 5-B.3b-ii-b-2b the two intervals + `origin` + the swap, 5-B.3b-ii-b-2c the evacuation + the scan pointer + the generated drive |
 | JPL.6 · #26 | Mechanical D-60411 *shall*-rule lint gate on emitted C (`clang -std=c99 -Wall -Wextra -Wconversion -Werror` + static analyzer) | *`verify/c/jpl_lint.sh`* — pending |
 | JPL.7 · #27 | C host + differential conformance: C99 == extracted kernel == `/bin/sh` | *`verify/c/*`* + oracle `verify/src/conformance.sh`, `verify/src/cases` — pending |
 
@@ -1302,10 +1721,10 @@ tracker task status and this rollup must agree.
 
 | Bucket | Stages | Count |
 |---|---|---|
-| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39), 5-B.2b (#40), 5-B.2c, 5-B.3a (#41), 5-B.3b-i (#41), 5-B.3b-ii-a (#42), 5-B.3b-ii-b-0 (#41), 5-B.3b-ii-b-1 (#41), 5-B.3b-ii-b-2a (#41) | 24 |
+| ✅ DONE | JPL.1, JPL.2, JPL.3, JPL.3b, JPL.4, 5-A.1, 5-A.2, 5-A.3, 5-A.3 gap (#34), 5-A.4, 5-A.5, 5-A.6, 5-A.7, 5-B.1, 5-B.2a, 5-B.2 (#39), 5-B.2b (#40), 5-B.2c, 5-B.3a (#41), 5-B.3b-i (#41), 5-B.3b-ii-a (#42), 5-B.3b-ii-b-0 (#41), 5-B.3b-ii-b-1 (#41), 5-B.3b-ii-b-2a (#41), 5-B.3b-ii-b-2b (#41), 5-B.3b-ii-b-2c (#41) | 26 |
 | 🔵 IN PROGRESS | — | 0 |
-| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3b-ii-b-2b..6 — decision 3's step-boundary copying (its edge table landed), the two loop forms, `MAX_STACK`'s depth guard, the 5 model-side fold rewrites; ii-b-0 ordered them, ii-b-1 landed the runtime and ii-b-2a the table), JPL.6 (#26), JPL.7 (#27) | 3 |
-| **Total** | | **27** |
+| ⏳ PENDING | JPL.5 (#25, remaining half = 5-B.3b-ii-b-2d..6 — decision 3's step-boundary copying (its edge table, its two intervals and the per-cell evacuation landed; the roots and `collect`, the driven cross-pool collector probe, and the multi-pool boundary remain), the two loop forms, `MAX_STACK`'s depth guard, the 5 model-side fold rewrites; ii-b-0 ordered them, ii-b-1 landed the runtime, ii-b-2a the table, ii-b-2b the space to copy into and ii-b-2c the copy), JPL.6 (#26), JPL.7 (#27) | 3 |
+| **Total** | | **29** |
 
 *Rollup hygiene, recorded because the table was wrong before this edit*: **5-B.2c** and
 **5-B.3a** closed without ever joining this rollup or gaining a §9.1 row — each landed its
@@ -1399,12 +1818,27 @@ of it says whether it is a handle, but no body may return one until a survivor i
 rewind.  **Specified as §6.7** (2026-10-05), which fixes the boundary and its derived roots, derives
 the per-slot edge table R7's one-word slots cannot express, splits the work into ii-b-2a..e, and
 shows the two spaces cost **+0.9 %** of static storage rather than a doubling — the headroom-2
-product becoming the from/to split instead of being re-guessed.  **Its first slice, ii-b-2a, landed
-2026-10-05**: every sized pool now publishes one class per word of its cell, so "live" has a
-referent — 45 EDGE words the collector is told to follow.  The front is therefore **ii-b-2b**, the
-two intervals (capacity `2·cap + 2`, the from/to bounds, `origin`, `is_live` as an interval
-comparison), which is the rung that turns §6.6's recorded aliasing debt into a comparison rather
-than an analysis.
+product becoming the from/to split instead of being re-guessed.  **Three of its slices have landed.**
+**ii-b-2a** (2026-10-05): every sized pool publishes one class per word of its cell, so "live" has a
+referent — 45 EDGE words a collector is told to follow.  **ii-b-2b** (2026-10-06): the array is now
+**two intervals** (`2·cap + 2` indices, `2·(cap+1)`, each space reserving its own index 0), every pool
+has the `origin` array a forward writes, `is_live` is the three-bound interval comparison, and the
+whole runtime has **one** interval indicator with **one** writer — which is the rung that turned
+§6.6's recorded aliasing debt into a measurement: the sweep now calls a handle from the abandoned
+interval dead *while it sits below the current `next`*, a case a one-interval runtime cannot express
+and, as the negative control showed, cannot even fail.
+**ii-b-2c** (2026-10-06): the word between them.  Per pool the runtime now has `evac` with the
+four-arm forwarding test, the `word_at`/`word_put` chains that let the scan rewrite one EDGE word of a
+copied cell without a pointer or a cast, `queue_start`/`scan_one`/`drain` over a to-space **scan
+pointer**, one `evac_by_class` dispatch whose 8 arms cover the whole target-id domain, and the
+`origin` clear inside `alloc` that makes the test's third arm mean *this round* — plus a generated
+drive that walks a three-cell chain with shared tail across **two** boundaries for each of the six
+pools that have a self edge, asserts `copies 5 / forwarded 1` and the 18 refused bad references, and
+catches the two collector bugs that move **no** number in the report.
+The front is therefore **ii-b-2d**, the roots and the boundary: a derived root list for `cfg`/`out`,
+`jpl_collect()` = evacuate the roots + drain every pool's scan + swap, and `BLimit` on overflow.  The
+primitive exists and is measured; **nothing calls it**, which is why every kernel-attributable `peak`
+in this tree is still the 0 the report prints.
 **5-B.3a**, the measurement that had to precede the
 bodies, **5-B.3b-i**, the ABI declarations that measurement already fully determined,
 **5-B.3b-ii-a**, the scalar-leaf bodies §6.4 could prove renderable, **5-B.3b-ii-b-0**, the
@@ -1425,7 +1859,9 @@ extracted term.  5-B.2c (2026-10-05) closed the one gap the derivation left insi
 decision 1: `cmd` and `frame` were declared pooled but the header dimensioned only their
 *list* cells, so the type layer now also declares `jpl_cmd_pool` (`JPL_MAX_CMD` cells ×
 headroom) and `jpl_frame_pool` (`JPL_MAX_STACK` cells × headroom) — 8 `extern` pools, bounded
-total **34 049.0 KiB** — and the two halves of the decision are cross-checked by the emitter,
+total **34 049.0 KiB** *(those eight arrays are **34 051.2 KiB** of pools plus **315.1 KiB** of
+`origin` tables since §6.7's ii-b-2b made each one a two-interval region — §6.7 paragraph 4's
++0.93 %, not the doubling a "two pools" reading implies)* — and the two halves of the decision are cross-checked by the emitter,
 which refuses a name in `pooled_types` that `pool_cap` does not size rather than letting it
 silently fall through to a by-value layout.  Block **2f (5-B.3a + 5-B.3b-i + 5-B.3b-ii-a)**
 reads the same closure for *shape* rather than layout — one lowering schema per binding, R8's
@@ -1526,17 +1962,20 @@ missing bound rather than by a design choice**:
    by-value fat layout.  Strength, restated after all three closes: the recursivity
    that forces the handle encoding is **read off the artifact's own type declarations** (a
    definition, so certain); every cell size and every cap relation is **checked by the
-   compiler** (36 `typedef char jpl_check_*[…]` array-bound assertions cover all emitted
+   compiler** (**86** `typedef char jpl_check_*[…]` array-bound assertions cover all emitted
    types — each aggregate row by itself, the one-word typedefs as a family, the cap
-   relations and the word width — the two new ones pinning `JPL_MAX_WORDS` to its named sum
-   `2·MAX_STACK + 2·MAX_ENV + 2` and to `MAX_STACK ≤ MAX_WORDS ≤ GLOB_FUEL`); the pools'
-   **34 049.0 KiB** bounded total is compiler-checked arithmetic on the ten artifact-carried
+   relations and the word width, the two pinning `JPL_MAX_WORDS` to its named sum
+   `2·MAX_STACK + 2·MAX_ENV + 2` and to `MAX_STACK ≤ MAX_WORDS ≤ GLOB_FUEL`, and since
+   §6.7's ii-b-2b four per pool saying the two intervals tile the array, serve exactly the
+   artifact's cap and share their index domain with `origin`); the pools'
+   **34 051.2 KiB** bounded total (**34 366.3 KiB** with the eight `origin` tables ii-b-2b
+   adds) is compiler-checked arithmetic on the ten artifact-carried
    caps, of which the tree half and the environment half are **proved in the model**
    (`cmd_fits_words`, `benv_words_le`) and the expanded-copy half is the **named obligation**
    "one live frame per source node"; and the per-step allocation bound is **not established
    either way**.  What closing (a) cost, printed by the same report: the slab alone is
-   **33 414.0 KiB** of that 34 049.0 KiB — **98 %** of everything the type layer asks a host
-   to link, and **52.6×** the seven pools beside it (635.0 KiB, counted in bytes rather
+   **33 416.0 KiB** of that 34 051.2 KiB — **98 %** of everything the type layer asks a host
+   to link, and **52.6×** the seven pools beside it (635.2 KiB, counted in bytes rather
    than cells) — a number a JPL.7 host has to link, which
    is why §6 also records the `uint8_t`-codes follow-on instead of leaving it to be
    rediscovered.
@@ -1561,9 +2000,11 @@ missing bound rather than by a design choice**:
 
 | Check | Status | Where |
 |---|---|---|
-| Models gate (coqc + coqchk ×8 + 3 extraction blocks + the three emitter rungs) | **17/17 green** (11/11 until 5-B.1 added block 2d + its negative control → 13/13; 5-B.2 added block 2e + 2e-negative → 15/15; 5-B.3a added block 2f + 2f-negative → **17/17**; 5-B.3b-i, 5-B.3b-ii-a and 5-B.3b-ii-b-0 added **checks** to 2f rather than rungs — that script grew from four checks to six, then eight, and ii-b-0 extended check 5 — and 5-B.3b-ii-b-1 did the same to 2e, whose four checks are now seven, and ii-b-2a's edge table made them **eight**, so the count is unchanged and what it means is wider) | `verify_models.sh` |
-| A pool cell exists, is bounded, and fails loudly at the bound | **measured, and measured twice** — the emitted `sh_run_jpl_pools.c` compiles under the JPL flag set *with* code generation (`-Wconversion -Wsign-conversion -Werror`, no `-fsyntax-only`), and a sweep generated from the header's own allocator declarations drives all **8** regions to exhaustion: `served == C-1`, `refused == 4`, `peak == C-1`, `0` assertion failures, `jpl_pools_refusals()` equal to the per-pool sum, a reset rewinding only the region.  The 13 `RUNTIME SUMMARY` keys then close against each other, the header and the TU (`runtime_names_colliding_with_prototypes = 0`, `counters_emitted = 4 × allocators_emitted`, `runtime_cells_total` = the sum of the header's macros) | gate block 2e, checks 3, 5 and 6; `verify/c/sh_run_jpl_pools.c`, §6.6 |
-| Which word of a cell is a handle, and what may be forwarded through it | **measured, and measured four ways** — every sized pool publishes one class **per word** of its cell (`jpl_<stem>_edge[]`, dimensioned by `JPL_<stem>_NEDGE`) and `NPOS × 4 == sizeof (cell)` as a `jpl_check_*` typedef, so the compiler rather than a comment says a row covers the struct it describes.  **8** tables / **26** rows / **358** classes = 286 SCALAR + 27 UNUSED + 45 EDGE, partition residual **0**; an edge may name exactly the **8** pools the header declares, in both directions; the word slab's all-scalar row is *derived* from the array field its struct declares, not excepted from the walk.  Check 7 re-derives rows, widths and classes from the header's constructor comments, from the pools TU's initialiser tokens one class at a time, and from the `.mli`'s arities with **parenthesis depth counted** — three readings that never consult the table — and asserts two properties the collector depends on (a node row's first word is SCALAR, no `UNUSED` sits inside a row).  **Nothing reads a table yet**: this is a collector's data dependency, not a reachability result | gate block 2e, check 7; `verify/c/sh_run_jpl.h`, `verify/c/sh_run_jpl_pools.c`, §6.7 |
+| Models gate (coqc + coqchk ×8 + 3 extraction blocks + the three emitter rungs) | **17/17 green** (11/11 until 5-B.1 added block 2d + its negative control → 13/13; 5-B.2 added block 2e + 2e-negative → 15/15; 5-B.3a added block 2f + 2f-negative → **17/17**; 5-B.3b-i, 5-B.3b-ii-a and 5-B.3b-ii-b-0 added **checks** to 2f rather than rungs — that script grew from four checks to six, then eight, and ii-b-0 extended check 5 — and 5-B.3b-ii-b-1 did the same to 2e, whose four checks are now seven, and ii-b-2a's edge table made them **eight**; ii-b-2b rewrote check 5's sweep rather than adding a ninth, so the count is unchanged and what it means is wider; **ii-b-2c added the ninth check** — a generated evacuation drive, again inside 2e's script, so the runner is still 17 rungs) | `verify_models.sh` |
+| A pool cell exists, is bounded, and fails loudly at the bound | **measured, and measured twice** — the emitted `sh_run_jpl_pools.c` compiles under the JPL flag set *with* code generation (`-Wconversion -Wsign-conversion -Werror`, no `-fsyntax-only`), and a sweep generated from the header's own allocator declarations drives **both intervals** of all **8** pools to each bound: `served == cap` per interval, `refused == 6` (three past each bound, one from an un-rewound region after a swap, one ending each fill), `peak == cap` **in both** intervals (so it is a per-region count, not the high-water index), a rewind that returns `cells` for the region it owns and **0** for one it does not, `0` assertion failures, and `jpl_pools_refusals()` equal to the per-pool sum (**48**).  The **38** `RUNTIME SUMMARY` keys then close against each other, the header and the TU (`runtime_names_colliding_with_prototypes = 0`, `counters_emitted = 7 × allocators_emitted + tag_guards_emitted + 1`, `mutable_globals_emitted = counters + scan_pointers + space_globals` and equal to the declarations counted in the TU, `mutable_globals_bytes = 4 × mutable_globals_emitted`, `runtime_cells_total` = the sum of the header's macros, `space_cells_served_total + allocators_emitted == runtime_cells_total / regions_per_pool` — the reserved base of every interval, made visible rather than rounded away) | gate block 2e, checks 3, 5 and 6; `verify/c/sh_run_jpl_pools.c`, §6.6 |
+| A handle carried across a swap is dead, and decidable without a liveness analysis | **measured, and this is the rung §6.6 recorded as debt** — `is_live` is the three-bound interval comparison, and the sweep keeps a handle allocated in the low interval, swaps, and asserts *both* that it still sits **below** the current `next` and that the runtime calls it dead, once per interval, then requires the two counters equal and non-zero so a probe that never reached the case cannot pass it silently: **16** assertions across the eight pools.  The array is `SPACES·(cap+1)` indices with each space reserving its own index 0, `origin[]` covers the whole index domain (`sizeof` pinned against the pool's own dimension), and the interval indicator is **one** global whose **assignments are counted in the file that defines it** (2: the definition and `jpl_pools_swap()`).  Teeth: reverting the comparison to §6.6's reading moved **no report key at all** and produced exactly those 16 failures — the mutation is invisible to every accounting rung and fatal to this one | gate block 2e, checks 5 and 6; §6.7 paragraph 4 |
+| Which word of a cell is a handle, and what may be forwarded through it | **measured, and measured four ways** — every sized pool publishes one class **per word** of its cell (`jpl_<stem>_edge[]`, dimensioned by `JPL_<stem>_NEDGE`) and `NPOS × 4 == sizeof (cell)` as a `jpl_check_*` typedef, so the compiler rather than a comment says a row covers the struct it describes.  **8** tables / **26** rows / **358** classes = 286 SCALAR + 27 UNUSED + 45 EDGE, partition residual **0**; an edge may name exactly the **8** pools the header declares, in both directions; the word slab's all-scalar row is *derived* from the array field its struct declares, not excepted from the walk.  Check 7 re-derives rows, widths and classes from the header's constructor comments, from the pools TU's initialiser tokens one class at a time, and from the `.mli`'s arities with **parenthesis depth counted** — three readings that never consult the table — and asserts two properties the collector depends on (a node row's first word is SCALAR, no `UNUSED` sits inside a row).  **Since ii-b-2c the table has a reader**: `jpl_<stem>_scan_one` walks exactly `NPOS` classes of the row its cell's tag names, and the drive follows 45 EDGE words' worth of them across two boundaries — so this is no longer only a data dependency, though it is still not a reachability *result* until ii-b-2d's roots make a walk start on its own | gate block 2e, checks 7 and 9; `verify/c/sh_run_jpl.h`, `verify/c/sh_run_jpl_pools.c`, §6.7 |
+| One cell is evacuated, forwarded, and re-evacuated across a second boundary | **measured, by a drive whose shape is derived rather than typed** — for each of the **6** pools whose edge table names its own pool (found by awk, which records `word = col % NPOS`, `row = col / NPOS` and refuses if a table's `NPOS`/`NROWS` are missing; **`cmd` is one of the six**, at word 1 of row 3, which corrects this doc's earlier claim that it had no self edge), the generated probe builds `a → b`, `c → b`, crosses the boundary in the runtime's own order (`swap`, `reset`, `queue_start`, `evac` the roots, `drain`) and crosses back.  Every chain answers `copies 5 forwarded 1 badref 3 taken 9 peak 3`: round 1 copies three and forwards one (the shared tail — the survivor count design item (ii) asked for), the copy is structurally equal to its source word by word, `scan == next` at the fixpoint; round 2 asserts `origin[a]` still names last round's copy *and* that `alloc` hands back a cell whose own entry is nil, then copies rather than forwards, which is 5bis's third-and-fourth-arm argument made observable.  `badref` **3** per chain — a handle in the current interval (a copy of a copy), `OTHER_BASE` (the reserved zero of the region being read from), `JPL_POOL_<KIND>` (one past the array) — 18 refusals with `next` unmoved, `evac(JPL_NIL)` moving nothing; and the two tagged pools get a second test in which a garbage tag (`NROWS + 5`) stops the scan with `badtag` **1** and leaves **4** (`cmd`) / **5** (`frame`) non-nil words exactly as written, so a scan that walked slots as scalar cannot pass it.  `jpl_pools_unclassified == 0` per chain, per tag test and for the whole run; **0** assertion failures over all eight functions.  *Teeth*, in a scratch mirror: dropping `alloc`'s origin clear gives **78** failures and moves one key (`origin_clears_emitted` 8 → 0); deleting the mutual arm (`origin[o] == h` → `o < next`, arity-preserving) gives the same **78** failures and moves **no** summary key; mis-wiring one dispatch arm's class macro gives **24** failures with `unclassified = 10` and also moves **no** summary key — two of the three collector bugs here are invisible to every count in the report, and this rung is the only one that sees them | gate block 2e, check 9; `verify/c/jpl_emit.sh`, `verify/c/sh_run_jpl_pools.c`, §6.7 paragraph 5bis |
 | Every shipped binding has a lowering schema, over the vendored bytes | **measured** — 47 members classified into 26 straight-line + 7 fuel tail loops + 4 one-trip fuel idioms + 3 structural tail loops + 5 non-tail folds + 2 operator aliases, with each loop's first fuel traced to a parameter; the 5 folds are printed as `BOUNDED FOLD (non-tail)` **refusals**, not as lowering targets *(this row read "6 straight-line" until 5-B.3b-i audited it — 6 + 7 + 4 + 3 + 5 + 2 is 27, not the 47 the report marks, and the row had been quoted as if it agreed)* | `verify/c/jpl_lower.sh`, gate block 2f, `verify/c/lowering.txt` |
 | R8's instance set is counted, not assumed | **measured** — 5 polymorphic bindings, 29 call-site uses, **6 closed** instances (one C function each) and **6 open** (nothing to emit), each open one justified by a use point the interface cannot close | `verify/c/lowering.txt`, gate block 2f |
 | A lowering cannot need a function pointer (D-60411 forbids them) | **asserted zero** — 68 first-class-function sites, each in one of the four positions a lowering absorbs, `function_value_sites_unnamed = 0`.  Since 5-B.3b-i this zero is known to be a **different statement** from "every instance is nameable": `abi_refused_no_c_type = 1`, because a value can sit in a position the control-flow rules absorb and still leave its *callee* with no C type (§6.3's ABI paragraph) | gate block 2f, checks 2 and 4 |
@@ -1578,11 +2019,12 @@ missing bound rather than by a design choice**:
 | One C spelling rule for three layers | **measured** — `c_fn`/`c_upper`/`data_macro`/`cap_macro_of_data` moved from `jpl_emit.ml` into the shared reader, and the emitter's hand-typed seven-name cap list became derived from the artifact's own cap table; 2d and 2e were re-run and `closure.txt`, `layout.txt` and `sh_run_jpl.h` came out **byte-identical**, so the move changed the ownership of the rule and not the C it produces | `verify/c/jpl_ast.ml` §9, gate blocks 2d and 2e |
 | Vendored census evidence is byte-identical to a fresh census | **measured** — `verify/c/lowering.txt` (783 lines), `verify/c/sh_run_jpl_abi.h` (50), `verify/c/sh_run_jpl_bodies.c` (49) and both generated drivers (`jpl_bodies_diff.c` 20, `jpl_bodies_diff.ml` 14) regenerated and `diff -q`'d (`JPL_REGEN=1` re-pins all five together, so a TU or a driver that drifts from its measurement cannot be vendored silently) | `verify/c/jpl_lower.sh` check 8, gate block 2f |
 | The gate reads measurements, not prose | **measured** — `lowering.txt` ends with a 44-key SUMMARY, each key marked by the section that produced it, and the run **refuses** if a key is missing; `jpl_lower.sh` takes its assertions from those keys | `verify/c/jpl_lower.ml`, `verify/c/jpl_lower.sh` |
-| Emitted C99 header compiles under the strict JPL flag set | **measured** — `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only` clean over `verify/c/sh_run_jpl.h`; **36 compile-time assertions** cover every emitted type (each aggregate row carries its own `sizeof` check, the 13 one-word typedefs are covered by `jpl_check_one_word_families`) and every cap relation, so a wrong byte count is a build failure, not a stale comment.  34 until 5-B.2b added `jpl_check_words_is_the_named_sum` and `jpl_check_words_order` | `verify/c/jpl_emit.sh` check 2, gate block 2e |
+| Emitted C99 header compiles under the strict JPL flag set | **measured** — `clang -std=c99 -Wall -Wextra -Wconversion -Wsign-conversion -pedantic -Werror -fsyntax-only` clean over `verify/c/sh_run_jpl.h`; **86 compile-time assertions** cover every emitted type (each aggregate row carries its own `sizeof` check, the 13 one-word typedefs are covered by `jpl_check_one_word_families`) and every cap relation, so a wrong byte count is a build failure, not a stale comment.  36 through 5-B.2b, **53** after ii-b-2a's 8 `edge_covers_the_cell` rows, **86** after
+**ii-b-2b** adds 32 interval relations (four per pool: `two_regions`, `regions_tile_the_array`, `region_serves_the_cap`, `origin_is_the_index_domain`) plus the swap's `pools_flip_cycles_the_intervals`, and **87** since **ii-b-2c**'s `jpl_check_dispatch_arms_cover_every_target`, which pins the highest target id a table can contain against the last arm the dispatch can reach — the one compile-time relation in this layer that is about a *chain of functions* rather than about a size | `verify/c/jpl_emit.sh` check 2, gate block 2e |
 | The **ten** capacities agree across the artifact, the fold and the header | **measured** — a probe that carries no number reads `Sh_run_c.jpl_caps_table` at runtime; the emitter's syntactic fold of the same term must match it name-for-name, and each value must appear as `#define JPL_<NAME> <value>u` in the emitted header.  Nine until 2026-10-05, when `jpl_words = 16642` became the tenth | `verify/c/jpl_emit.sh` check 3, gate block 2e |
-| Every declared pool has a capacity, including the word slab and the two node pools | **measured** for the dimension (8 `extern` pools, all array-sized from `jpl_caps_table`, total 34 049.0 KiB, the slab 33 414.0 KiB of it, `jpl_cmd_pool` 128.0 KiB and `jpl_frame_pool` 320.0 KiB since 5-B.2c) · **proved** for the tree half (`cmd_fits_words`) and the environment half (`benv_words_le`) · **owed** for the expanded-copy half (the named invariant "one live frame per source node", §6) | `verify/c/layout.txt`, `sh_jpl.v` §1/§5/§7.1, gate block 2e |
+| Every declared pool has a capacity, including the word slab and the two node pools | **measured** for the dimension (8 `extern` pools, all array-sized from `jpl_caps_table`; since ii-b-2b each is `SPACES·(cap+1)` indices, so the pool storage is **34 051.2 KiB** — the slab 33 416.0 KiB of it, `jpl_cmd_pool` 128.0 KiB and `jpl_frame_pool` 320.0 KiB since 5-B.2c — plus **315.1 KiB** of `origin` tables for a bounded static total of **34 366.3 KiB**) · **proved** for the tree half (`cmd_fits_words`) and the environment half (`benv_words_le`) · **owed** for the expanded-copy half (the named invariant "one live frame per source node", §6) | `verify/c/layout.txt`, `sh_jpl.v` §1/§5/§7.1, gate block 2e |
 | The layout layer is root-sensitive too (has teeth) | **measured** — roots `run,step,mrun` ⇒ `FATAL: tn: a function-typed value has no layout`, exit 1; the refused value is the oracle cluster's driver parameter (`type run_phi = int -> text list -> cstate -> cstate option`), a *different* reason than 2d-negative's mutual-fixpoint refusal | gate block 2e-negative |
-| Vendored representation evidence is byte-identical to a fresh emit | **measured** — `verify/c/sh_run_jpl.h` + `verify/c/layout.txt` regenerated and `diff -q`'d (`JPL_REGEN=1` to re-pin) | `verify/c/jpl_emit.sh` check 4, gate block 2e |
+| Vendored representation evidence is byte-identical to a fresh emit | **measured** — `verify/c/sh_run_jpl.h` (1176 lines) + `verify/c/sh_run_jpl_pools.c` (1834) + `verify/c/layout.txt` (235) regenerated and `diff -q`'d (`JPL_REGEN=1` re-pins all **three**, but the copy is **deferred to after check 9**, so a regeneration cannot vendor evidence the evacuation drive has not just approved — the pin is the last thing a green run does) | `verify/c/jpl_emit.sh` checks 8 and 9, gate block 2e |
 | Shipped closure inside the emitter's declared subset, over the vendored bytes | **measured** — `SUBSET OK` over roots `mrun_c,step_c`; inventory byte-compared against `verify/c/closure.txt` | `verify/c/jpl_front.sh`, gate block 2d |
 | The subset check has teeth (root sensitivity) | **measured** — roots `run,step,mrun` ⇒ `OFF-SUBSET mutual fixpoint: expand, expand_name, expand_brace, run, run_seq, run_for, run_case`, exit 1 | gate block 2d-negative |
 | `glob_it` soundness vs L2 `glob` (arbitrary input, no fuel hypothesis) | proved — `glob_it_sound`, `glob_iter_sound`, `glob_iter_accepts_glob`, `match_any_iter_sound` | `sh_jpl_scan.v` §4.2.3 |
@@ -3712,5 +4154,171 @@ the current allocation pointer".  ii-b-2a gave "live" a referent; ii-b-2b is the
 ii-b-2d (roots, `jpl_collect()`, the swap, `BLimit`), ii-b-2e (the driven collector's gate), then
 ii-b-3/4 (the two loop forms), ii-b-5 (`MAX_STACK`'s depth guard), ii-b-6 (the 5 model-side
 `BOUNDED FOLD` rewrites plus `branch_guardb`/`forallb`).
+
+### JPL.5-B.3b-ii-b-2b / #41 — DONE (2026-10-06): the two intervals, and the comparison staleness needed
+
+**What opened the slice.**  After 2a the runtime could name the 45 words a collector must follow, and
+still had nowhere to copy a cell *to*: §6.6's array was one region with one reserved index 0, so there
+was no to-space, no `origin` for a forwarded handle to live in, and no second interval for `is_live`
+to be *about*.  That last absence is the reason the swap belongs to this slice rather than to ii-b-2d,
+which is its first caller: with one region, `h < next` and "inside the current interval and below
+`next`" answer identically for every value of `h`, so §6.7's design item (iii) — a stale handle must
+read dead *while sitting below the current `next`* — is not merely untested there, it is
+**inexpressible**.  A slice that lands a comparison nobody can falsify is a slice that lands a comment.
+
+**The three choices the slice makes.**  (i) **One array, two intervals**, dimension
+`SPACES·(cap+1)` = `2·cap+2`, because §6.6's "a pool of `C` indices serves `C-1`" is a *per-region*
+law: a capacity of `2·cap` would have served `cap-1` live cells, one fewer than the artifact's cap,
+and the shortfall would have surfaced at runtime as a `BLimit` the model does not produce.  Each space
+reserves its own index 0, so the two indices that name no cell are `0` and `cap+1`.  (ii) **One
+indicator for the whole graph**: `jpl_pools_space` is a single global whose single writer is
+`jpl_pools_swap()`, not eight per-pool flags — every pool moves together at a step boundary, so eight
+flags are eight chances to disagree about a fact that has one cause.  (iii) **Handles stay absolute**,
+which is what buys the origin array its domain (one array per pool, indexed by the handle, sized by the
+same `JPL_POOL_<KIND>` as the pool so the two cannot drift) and staleness its one comparison.  The
+**scan pointer is deliberately absent**: it is the to-space's queue, so it belongs to the evacuation
+that advances it (ii-b-2c), and emitting a counter nothing writes yet is the invention §6.2 refuses.
+
+**The transient the swap creates, which no single-interval runtime has.**  A bare swap leaves every
+pool's `next` an absolute index in the interval that was just *abandoned*.  Two consequences, and both
+are now rungs rather than observations: an allocation into the new region before its `reset` would
+hand back that region's reserved index-0 nil, so the guard is `next > CUR_BASE && next < CUR_TOP` and
+the probe asserts the **refusal**; and `reset`'s `next - CUR_BASE - 1u` would underflow across zero,
+so the rewind is two-sided and returns `0` for an interval it does not own.  The design's answer is
+the contract "a driver rewinds at the boundary", and the sweep walks exactly that sequence — fill,
+swap, refuse, rewind, fill the other side, swap back — so the transient is driven, not described.
+After the second swap a low-interval handle can read live again while the low region's own `next` is
+still rewound; that is the contract talking, which is why the sweep does not assert `is_live` in that
+window and asserts it twice in the two windows where the answer is forced.
+
+**Gate and evidence state after 5-B.3b-ii-b-2b.**  `verify_models.sh` is **17/17**, exit 0, with **no
+edit to the runner**: everything new lives inside `verify/c/jpl_emit.sh`, whose check 5 sweep was
+rewritten as four phases over both intervals and whose check 6 gained the interval identities.  The
+`RUNTIME SUMMARY` key set goes **13 → 25**; the header **557 → 805** lines, the pools TU **487 → 769**,
+`layout.txt` 217.  2f's declared-pool grep still returns **eight**, because the arrays this slice adds
+are `jpl_<stem>_origin[…]`, not `jpl_<stem>_pool[…]` — the two-interval reading stays inside one
+array's index domain, which is the property §6.7 paragraph 4 chose it for.  Check 7 is untouched and
+re-reads the same 8 tables / 26 rows / 358 classes, the deliberate cross-check that a word's class is a
+property of its cell's type and not of the region holding it.  Two placements were found by measurement
+rather than assumption: the flip-cycle assertion `jpl_check_pools_flip_cycles_the_intervals` is emitted
+into the **header** beside the `SPACES` macro it reads (the first grep for it in the TU returned 0 and
+would have been a false failure), and the indicator's assignment count is taken from the file that
+**defines** it — 2, the definition plus the writer — which is what turns "exactly one writer" from a
+sentence in this document into a rung.
+
+**The control that says the rung has teeth.**  Reverting `is_live` to §6.6's reading (`h > CUR_BASE`
+→ `h > 0u`; the same test, since `JPL_NIL` is 0) changed **no report key, no table, no other
+assertion**, and produced exactly **16** probe failures — the stale-below-`next` assertion firing in
+both intervals of all eight pools — before exiting non-zero.  That is the shape a good negative control
+has: the mutation is invisible to every accounting rung and fatal to the one that claims to be about
+intervals.  The other controls for this slice (a `SPACES × cap` dimension refused by two emitted
+typedefs at compile time; a stale `2·cap` literal at a registration site, refused by the emitter's own
+`INTERVAL REFUSED` before any file was written; a second writer, measured moving 2 → 3; a dropped
+`JPL_<KIND>_LO_BASE`, caught by the probe generator's own missing-macro refusal) are in §6.6's
+*Measured* paragraph.  All of them ran against a **scratch mirror** of `verify/c/` rather than the
+tree, because mutating the shipped emitter is exactly the edit the permission classifier blocks — the
+block is correct, and a mirror that first reproduces a green run measures the same thing.
+
+**Honest limits after 5-B.3b-ii-b-2b.**  (i) Still **no collector**: `origin` is written by nothing,
+no cell is copied, and the 45 EDGE words are still read by no C — the slice supplies the space and the
+predicate, not the walk.  (ii) The **scan pointer does not exist**, by design, so design item (ii)
+("a probe that copies a graph with *known* sharing") stays owed to ii-b-2e and no rung here can
+distinguish a future correct copy from one that copies everything.  (iii) Every
+*kernel-attributable* `peak` is still **0** — the number the sweep reports is a runtime driven to its
+bound, which is the distinction §6.6's "instrument, not the number" paragraph exists to keep.  (iv) The
+swap has **no caller**: nothing flips the interval in a lowering, so the one-writer rung currently
+counts a writer nothing invokes yet, and the first caller (ii-b-2d's `jpl_collect()`) is where
+"a driver rewinds at the boundary" becomes an obligation with an owner.  (v) The four rendered bodies
+are untouched, which the gate checks byte-for-byte, and no `OWED-REPRESENTATION` verdict moved: a cell
+now has somewhere to be copied, which is still not a body being allowed to return one.
+
+Next: **ii-b-2c**, evacuate one cell — read a word's class, copy a SCALAR as a word, turn an EDGE into
+a to-space handle through `origin`, and carry the scan pointer that lets a copied cell be walked,
+fixpoint over one pool.  Then ii-b-2d (roots, `jpl_collect()`, `BLimit`), ii-b-2e (the driven
+collector's gate), then ii-b-3/4 (the two loop forms), ii-b-5 (`MAX_STACK`'s depth guard), ii-b-6 (the
+5 model-side `BOUNDED FOLD` rewrites plus `branch_guardb`/`forallb`).
+
+### JPL.5-B.3b-ii-b-2c / #41 — DONE (2026-10-06): evacuating one cell, and the two collector bugs no counter can see
+
+**What opened the slice.**  2a produced 45 EDGE words and 2b produced two intervals, an `origin` array
+and a swap, and the pair of them still moved nothing: a word could be *labelled* a handle and its cell
+could have a *place* to be copied to, with no C that read one to obtain the other.  §6.7's closing
+sentence for two slices had been that the tables and the intervals were "honestly a data dependency".
+This slice is the dependency being executed once per word: `evac`, the whole-cell copy, the word
+chains that let the scan rewrite one EDGE word without a pointer or a cast, the to-space `scan`
+pointer with `queue_start`/`scan_one`/`drain`, and one runtime dispatch over the whole target-id domain.
+
+**The four choices the slice makes.**  (i) **Swap-then-rewind**, so that the allocator §6.6 already
+emitted *is* the to-space allocator: `allocators_emitted` stays 8 because the boundary flips the
+indicator before rewinding, and the alternative — a second family of to-space allocators — is a second
+model of a bound that `CUR_BASE`/`CUR_TOP` already own.  The consequence is stated in §6.7 and measured
+in check 5: after a swap, `reset` returns **0**, because one `next` per pool now names the to region
+and the from region's frontier stops being tracked.  (ii) **The copy is one structure assignment**, and
+the only place a word is addressed by index is the derived `word_at`/`word_put` chain — which is where
+R7's "every slot is one `uint32_t`" pays for itself, together with 2a's
+`NPOS * 4u == sizeof (cell)` typedef: no pointer, no cast, no strict-aliasing question, and the first
+pointer in the tree stays out of the tree.  (iii) **No arm of a chain is a bare `else`.**  A catch-all
+arm answers the last member's value for an index that has no member, which a collector then writes;
+every arm tests its own index, a read past the end answers `JPL_NIL` (the empty list — already "no
+child"), and coverage is enforced at the site where the arms are built, by five emitter refusals
+(members that do not reach `NPOS`, an array that is not the cell's trailing words, a word count that
+disagrees with the paths its by-value type expands to, a member wider than one word with no type to
+split it, a pool that registers no members at all) plus 2a's typedef.  (iv) **Four arms on `origin`,
+and the fourth is what makes the third true.**  The trace is two rounds deep: after a swap the from
+region *is* the previous round's to region, so `origin[t] = h` can name an index the current interval
+has already reached, all arms but the mutual one holding, and `evac` answering a cell whose words point
+at the interval being abandoned.  `jpl_<s>_alloc` therefore clears `origin` for the cell it hands out —
+one store, charged to a copy rather than to a region, which is §6.6's no-clearing-pass argument
+applied to a second array — and the mutual arm `origin[o] == h` is what turns "below the frontier" into
+"written *this* round".
+
+**The finding that changed the doc, not the code.**  This section claimed `cmd` had no self edge; the
+derivation in check 9 says otherwise — `Seq (cmd, cmd)` puts one at **word 1 of row 3**, which is why
+the drive has six chains and not five.  It is worth recording that the claim was made from the node
+pool's tag rows rather than from the emitted table, and that the gate now reads the table: the probe's
+size is a property of the artifact, so a pool gaining or losing a self edge changes the drive without
+anyone editing a literal in a shell script.  The same derivation supplies the row index a tagged
+chain's cell must carry, which is why each tagged chain also measures `scan_one`'s tag→row arithmetic.
+
+**Two of the three bugs here are invisible to every number in the report.**  The control run is green,
+then three mutations, each in a scratch mirror of `verify/c/`: dropping `alloc`'s origin clear (M1)
+moves one key (`origin_clears_emitted` 8 → 0) and fails **78** assertions; deleting the mutual arm's
+content (M2, `origin[o] == h` → `o < next`, arity-preserving so the emitted C compiles and no tautology
+warning fires) moves **no** key and fails the same **78**; mis-wiring one dispatch arm's class macro
+(M3, `text_list`'s edges evacuated through `frame`) moves **no** key either and fails **24** while
+`jpl_pools_unclassified` reaches **10**, i.e. the branch this section calls impossible turns out to be
+reachable and the report's arm count still says 8.  That is the load-bearing result of the slice: the
+accounting rungs were never going to see a forwarding test that lies, because a lie is a *relation*
+between two arrays and a count measures neither array's contents.  §6.7's design item (ii) said a
+collector must be driven, not read; this is the per-pool half of that claim, and it is why the drive
+landed as a check rather than as a note.
+
+**Gate and evidence state after 5-B.3b-ii-b-2c.**  `verify_models.sh` is **17/17**, exit 0, still with
+**no new rung**: the ninth check lives inside `verify/c/jpl_emit.sh`, which is now **nine** checks, and
+the `JPL_REGEN=1` re-pin moved to *after* it, so evidence can only be vendored by a run the drive
+approved.  Vendored bytes: `sh_run_jpl.h` **805 → 1176**, `sh_run_jpl_pools.c` **769 → 1834**,
+`layout.txt` **217 → 235**; 2f stays green with all five of its artifacts byte-identical and the four
+rendered bodies untouched.  The storage the slice predicted and the storage it produced are recorded in
+§6.7's *Measured* paragraph, including the one prediction that failed (40 new globals predicted, **35**
+emitted, because `badtag` exists only where a cell has a tag word) and the third independent reading of
+the tag-guard count (header `NROWS > 1`, the report key, the guards in the TU — all **2**).
+
+**Honest limits after 5-B.3b-ii-b-2c.**  (i) **Nothing calls any of it.**  There is no root list, no
+`jpl_collect()`, no loop over the eight pools and no `BLimit`, so the swap and the scan still have no
+owner — ii-b-2d, exactly as the slice table says.  (ii) The chains are **one pool deep**: the dispatch
+is crossed, because a self edge is routed through `evac_by_class`, but a graph that visits three
+different pools is design item (ii)'s cross-pool case and waits on ii-b-2e's probe.  (iii)
+`peak` is still **0** for every kernel-attributable run.  (iv) The `reset`-returns-**0** behaviour at a
+boundary is a real limit of the one-`next` design, documented rather than fixed: "cells returned by
+this reset" is only a meaningful quantity when the reset does not cross a boundary.  (v) `evac`'s domain
+is from-space handles; the drive asserts the refusal, but the case that *matters* — a root list naming
+the wrong interval — needs 2d's roots to arise.  (vi) No `OWED-REPRESENTATION` row moved: a cell can now
+be copied, and §6.3's schemas still gate whether a body may return one.
+
+Next: **ii-b-2d**, the roots and the boundary — a derived root list for `cfg`/`out`, `jpl_collect()` =
+evacuate the roots + drain every pool's scan + swap, saturating to `BLimit` on any to-space overflow,
+with the rung "a `collect` must not return success with a pool's `scan` behind its `next`".  Then
+ii-b-2e (the driven cross-pool collector gate), ii-b-3/4 (the two loop forms), ii-b-5 (`MAX_STACK`'s
+depth guard), ii-b-6 (the 5 model-side `BOUNDED FOLD` rewrites plus `branch_guardb`/`forallb`).
 
 

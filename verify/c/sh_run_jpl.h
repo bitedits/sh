@@ -275,134 +275,743 @@ typedef char jpl_check_one_word_families[((sizeof (jpl_nat) == 4u) && (sizeof (j
 /* ── the pools.  Definitions live in the emitted translation unit
    (JPL.md §6: no dynamic allocation); they are declared here so every
    consumer compiles against one capacity.  Index 0 is JPL_NIL and is
-   never allocated, so a capacity counts the reserved cell too. ── */
-#define JPL_POOL_WORD 33284u   /* from JPL_MAX_WORDS, 16642 cells, x headroom 2; sh_jpl.v §1's MAX_WORDS, a sum of the already-locked caps: MAX_STACK cells for
+   never allocated, so a capacity counts the reserved cell too — and
+   since §6.7's ii-b-2b there is one reserved index PER SPACE, because
+   each interval is a region in its own right: the array below is not two
+   pools, it is one index domain holding a from-space and a to-space that
+   move together when jpl_pools_swap() says so. ── */
+#define JPL_POOL_SPACES 2u   /* §6.7 paragraph 4: the headroom factor IS a number of
+                        intervals — 2 — rather than slack: one space holds the
+                        live set and the rest receive the copies a step boundary
+                        builds before releasing the original */
+extern jpl_nat jpl_pools_space;   /* which interval is current; one writer, jpl_pools_swap() */
+
+#define JPL_POOL_WORD 33286u   /* 2 spaces x (cap + 1) indices: 16642 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_WORDS; sh_jpl.v §1's MAX_WORDS, a sum of the already-locked caps: MAX_STACK cells for
     the words a pool-fitting tree holds (§7.1 cmd_fits_words, from cmd_words <= 2*
     cmd_count and cmd_fits), a second MAX_STACK for the runtime-expanded copies an
     FFor/FCase frame holds (the OWED step-machine invariant "one live frame per
     source node" — named in §1, not yet proved), 2*MAX_ENV for the environment's
     name/value cells (§5 benv_words_le), and 2 per-step temporaries. */
+#define JPL_WORD_CAP 16642u   /* cells ONE space serves = the artifact's number */
+#define JPL_WORD_SPACE (JPL_WORD_CAP + 1u)   /* indices a space occupies */
+#define JPL_WORD_LO_BASE 0u
+#define JPL_WORD_HI_BASE JPL_WORD_SPACE
+#define JPL_WORD_CUR_BASE (jpl_pools_space * JPL_WORD_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_WORD_CUR_TOP (JPL_WORD_CUR_BASE + JPL_WORD_SPACE)
+#define JPL_WORD_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_WORD_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_WORD_OTHER_TOP (JPL_WORD_OTHER_BASE + JPL_WORD_SPACE)
 extern jpl_text jpl_word_pool[JPL_POOL_WORD];
+extern jpl_ref jpl_word_origin[JPL_POOL_WORD];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_word_two_regions[((JPL_POOL_WORD == (JPL_POOL_SPACES * JPL_WORD_SPACE)) ? 1 : -1)];
+typedef char jpl_check_word_region_serves_the_cap[((JPL_WORD_SPACE - 1u) == JPL_WORD_CAP) ? 1 : -1];
+typedef char jpl_check_word_regions_tile_the_array[((JPL_WORD_HI_BASE + JPL_WORD_SPACE) == JPL_POOL_WORD) ? 1 : -1];
+typedef char jpl_check_word_origin_is_the_index_domain[((sizeof (jpl_word_origin) == (JPL_POOL_WORD * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_PAIR_TEXT_TEXT_LIST 256u   /* from JPL_MAX_ENV, 128 cells, x headroom 2; the environment's pair list (sh_jpl.v §5 wf_benv) */
+#define JPL_POOL_PAIR_TEXT_TEXT_LIST 258u   /* 2 spaces x (cap + 1) indices: 128 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_ENV; the environment's pair list (sh_jpl.v §5 wf_benv) */
+#define JPL_PAIR_TEXT_TEXT_LIST_CAP 128u   /* cells ONE space serves = the artifact's number */
+#define JPL_PAIR_TEXT_TEXT_LIST_SPACE (JPL_PAIR_TEXT_TEXT_LIST_CAP + 1u)   /* indices a space occupies */
+#define JPL_PAIR_TEXT_TEXT_LIST_LO_BASE 0u
+#define JPL_PAIR_TEXT_TEXT_LIST_HI_BASE JPL_PAIR_TEXT_TEXT_LIST_SPACE
+#define JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE (jpl_pools_space * JPL_PAIR_TEXT_TEXT_LIST_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_PAIR_TEXT_TEXT_LIST_CUR_TOP (JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE + JPL_PAIR_TEXT_TEXT_LIST_SPACE)
+#define JPL_PAIR_TEXT_TEXT_LIST_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_PAIR_TEXT_TEXT_LIST_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_PAIR_TEXT_TEXT_LIST_OTHER_TOP (JPL_PAIR_TEXT_TEXT_LIST_OTHER_BASE + JPL_PAIR_TEXT_TEXT_LIST_SPACE)
 extern jpl_pair_text_text_list_cell jpl_pair_text_text_list_pool[JPL_POOL_PAIR_TEXT_TEXT_LIST];
+extern jpl_ref jpl_pair_text_text_list_origin[JPL_POOL_PAIR_TEXT_TEXT_LIST];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_pair_text_text_list_two_regions[((JPL_POOL_PAIR_TEXT_TEXT_LIST == (JPL_POOL_SPACES * JPL_PAIR_TEXT_TEXT_LIST_SPACE)) ? 1 : -1)];
+typedef char jpl_check_pair_text_text_list_region_serves_the_cap[((JPL_PAIR_TEXT_TEXT_LIST_SPACE - 1u) == JPL_PAIR_TEXT_TEXT_LIST_CAP) ? 1 : -1];
+typedef char jpl_check_pair_text_text_list_regions_tile_the_array[((JPL_PAIR_TEXT_TEXT_LIST_HI_BASE + JPL_PAIR_TEXT_TEXT_LIST_SPACE) == JPL_POOL_PAIR_TEXT_TEXT_LIST) ? 1 : -1];
+typedef char jpl_check_pair_text_text_list_origin_is_the_index_domain[((sizeof (jpl_pair_text_text_list_origin) == (JPL_POOL_PAIR_TEXT_TEXT_LIST * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_CMD 8192u   /* from JPL_MAX_CMD, 4096 cells, x headroom 2; nodes of one lowered cmd tree (sh_jpl.v §1 MAX_CMD) */
+#define JPL_POOL_CMD 8194u   /* 2 spaces x (cap + 1) indices: 4096 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_CMD; nodes of one lowered cmd tree (sh_jpl.v §1 MAX_CMD) */
+#define JPL_CMD_CAP 4096u   /* cells ONE space serves = the artifact's number */
+#define JPL_CMD_SPACE (JPL_CMD_CAP + 1u)   /* indices a space occupies */
+#define JPL_CMD_LO_BASE 0u
+#define JPL_CMD_HI_BASE JPL_CMD_SPACE
+#define JPL_CMD_CUR_BASE (jpl_pools_space * JPL_CMD_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_CMD_CUR_TOP (JPL_CMD_CUR_BASE + JPL_CMD_SPACE)
+#define JPL_CMD_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_CMD_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_CMD_OTHER_TOP (JPL_CMD_OTHER_BASE + JPL_CMD_SPACE)
 extern jpl_cmd_node jpl_cmd_pool[JPL_POOL_CMD];
+extern jpl_ref jpl_cmd_origin[JPL_POOL_CMD];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_cmd_two_regions[((JPL_POOL_CMD == (JPL_POOL_SPACES * JPL_CMD_SPACE)) ? 1 : -1)];
+typedef char jpl_check_cmd_region_serves_the_cap[((JPL_CMD_SPACE - 1u) == JPL_CMD_CAP) ? 1 : -1];
+typedef char jpl_check_cmd_regions_tile_the_array[((JPL_CMD_HI_BASE + JPL_CMD_SPACE) == JPL_POOL_CMD) ? 1 : -1];
+typedef char jpl_check_cmd_origin_is_the_index_domain[((sizeof (jpl_cmd_origin) == (JPL_POOL_CMD * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_TEXT_LIST 2048u   /* from JPL_MAX_LIST, 1024 cells, x headroom 2; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_POOL_TEXT_LIST 2050u   /* 2 spaces x (cap + 1) indices: 1024 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_LIST; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_TEXT_LIST_CAP 1024u   /* cells ONE space serves = the artifact's number */
+#define JPL_TEXT_LIST_SPACE (JPL_TEXT_LIST_CAP + 1u)   /* indices a space occupies */
+#define JPL_TEXT_LIST_LO_BASE 0u
+#define JPL_TEXT_LIST_HI_BASE JPL_TEXT_LIST_SPACE
+#define JPL_TEXT_LIST_CUR_BASE (jpl_pools_space * JPL_TEXT_LIST_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_TEXT_LIST_CUR_TOP (JPL_TEXT_LIST_CUR_BASE + JPL_TEXT_LIST_SPACE)
+#define JPL_TEXT_LIST_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_TEXT_LIST_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_TEXT_LIST_OTHER_TOP (JPL_TEXT_LIST_OTHER_BASE + JPL_TEXT_LIST_SPACE)
 extern jpl_text_list_cell jpl_text_list_pool[JPL_POOL_TEXT_LIST];
+extern jpl_ref jpl_text_list_origin[JPL_POOL_TEXT_LIST];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_text_list_two_regions[((JPL_POOL_TEXT_LIST == (JPL_POOL_SPACES * JPL_TEXT_LIST_SPACE)) ? 1 : -1)];
+typedef char jpl_check_text_list_region_serves_the_cap[((JPL_TEXT_LIST_SPACE - 1u) == JPL_TEXT_LIST_CAP) ? 1 : -1];
+typedef char jpl_check_text_list_regions_tile_the_array[((JPL_TEXT_LIST_HI_BASE + JPL_TEXT_LIST_SPACE) == JPL_POOL_TEXT_LIST) ? 1 : -1];
+typedef char jpl_check_text_list_origin_is_the_index_domain[((sizeof (jpl_text_list_origin) == (JPL_POOL_TEXT_LIST * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_CMD_LIST 2048u   /* from JPL_MAX_LIST, 1024 cells, x headroom 2; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_POOL_CMD_LIST 2050u   /* 2 spaces x (cap + 1) indices: 1024 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_LIST; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_CMD_LIST_CAP 1024u   /* cells ONE space serves = the artifact's number */
+#define JPL_CMD_LIST_SPACE (JPL_CMD_LIST_CAP + 1u)   /* indices a space occupies */
+#define JPL_CMD_LIST_LO_BASE 0u
+#define JPL_CMD_LIST_HI_BASE JPL_CMD_LIST_SPACE
+#define JPL_CMD_LIST_CUR_BASE (jpl_pools_space * JPL_CMD_LIST_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_CMD_LIST_CUR_TOP (JPL_CMD_LIST_CUR_BASE + JPL_CMD_LIST_SPACE)
+#define JPL_CMD_LIST_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_CMD_LIST_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_CMD_LIST_OTHER_TOP (JPL_CMD_LIST_OTHER_BASE + JPL_CMD_LIST_SPACE)
 extern jpl_cmd_list_cell jpl_cmd_list_pool[JPL_POOL_CMD_LIST];
+extern jpl_ref jpl_cmd_list_origin[JPL_POOL_CMD_LIST];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_cmd_list_two_regions[((JPL_POOL_CMD_LIST == (JPL_POOL_SPACES * JPL_CMD_LIST_SPACE)) ? 1 : -1)];
+typedef char jpl_check_cmd_list_region_serves_the_cap[((JPL_CMD_LIST_SPACE - 1u) == JPL_CMD_LIST_CAP) ? 1 : -1];
+typedef char jpl_check_cmd_list_regions_tile_the_array[((JPL_CMD_LIST_HI_BASE + JPL_CMD_LIST_SPACE) == JPL_POOL_CMD_LIST) ? 1 : -1];
+typedef char jpl_check_cmd_list_origin_is_the_index_domain[((sizeof (jpl_cmd_list_origin) == (JPL_POOL_CMD_LIST * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST 2048u   /* from JPL_MAX_LIST, 1024 cells, x headroom 2; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST 2050u   /* 2 spaces x (cap + 1) indices: 1024 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_LIST; an intermediate list (sh_jpl.v §1 MAX_LIST) */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CAP 1024u   /* cells ONE space serves = the artifact's number */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE (JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CAP + 1u)   /* indices a space occupies */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_LO_BASE 0u
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_HI_BASE JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE (jpl_pools_space * JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_TOP (JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE + JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE)
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_TOP (JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_BASE + JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE)
 extern jpl_pair_text_list_cmd_list_list_cell jpl_pair_text_list_cmd_list_list_pool[JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST];
+extern jpl_ref jpl_pair_text_list_cmd_list_list_origin[JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_pair_text_list_cmd_list_list_two_regions[((JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST == (JPL_POOL_SPACES * JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE)) ? 1 : -1)];
+typedef char jpl_check_pair_text_list_cmd_list_list_region_serves_the_cap[((JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE - 1u) == JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CAP) ? 1 : -1];
+typedef char jpl_check_pair_text_list_cmd_list_list_regions_tile_the_array[((JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_HI_BASE + JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_SPACE) == JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST) ? 1 : -1];
+typedef char jpl_check_pair_text_list_cmd_list_list_origin_is_the_index_domain[((sizeof (jpl_pair_text_list_cmd_list_list_origin) == (JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_FRAME 16384u   /* from JPL_MAX_STACK, 8192 cells, x headroom 2; frames of the explicit machine stack (sh_jpl.v §1 MAX_STACK) */
+#define JPL_POOL_FRAME 16386u   /* 2 spaces x (cap + 1) indices: 8192 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_STACK; frames of the explicit machine stack (sh_jpl.v §1 MAX_STACK) */
+#define JPL_FRAME_CAP 8192u   /* cells ONE space serves = the artifact's number */
+#define JPL_FRAME_SPACE (JPL_FRAME_CAP + 1u)   /* indices a space occupies */
+#define JPL_FRAME_LO_BASE 0u
+#define JPL_FRAME_HI_BASE JPL_FRAME_SPACE
+#define JPL_FRAME_CUR_BASE (jpl_pools_space * JPL_FRAME_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_FRAME_CUR_TOP (JPL_FRAME_CUR_BASE + JPL_FRAME_SPACE)
+#define JPL_FRAME_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_FRAME_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_FRAME_OTHER_TOP (JPL_FRAME_OTHER_BASE + JPL_FRAME_SPACE)
 extern jpl_frame_node jpl_frame_pool[JPL_POOL_FRAME];
+extern jpl_ref jpl_frame_origin[JPL_POOL_FRAME];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_frame_two_regions[((JPL_POOL_FRAME == (JPL_POOL_SPACES * JPL_FRAME_SPACE)) ? 1 : -1)];
+typedef char jpl_check_frame_region_serves_the_cap[((JPL_FRAME_SPACE - 1u) == JPL_FRAME_CAP) ? 1 : -1];
+typedef char jpl_check_frame_regions_tile_the_array[((JPL_FRAME_HI_BASE + JPL_FRAME_SPACE) == JPL_POOL_FRAME) ? 1 : -1];
+typedef char jpl_check_frame_origin_is_the_index_domain[((sizeof (jpl_frame_origin) == (JPL_POOL_FRAME * sizeof (jpl_ref))) ? 1 : -1)];
 
-#define JPL_POOL_FRAME_LIST 16384u   /* from JPL_MAX_STACK, 8192 cells, x headroom 2; the machine stack = frame list */
+#define JPL_POOL_FRAME_LIST 16386u   /* 2 spaces x (cap + 1) indices: 8192 cells per space
+                        each keeping its own reserved 0; from JPL_MAX_STACK; the machine stack = frame list */
+#define JPL_FRAME_LIST_CAP 8192u   /* cells ONE space serves = the artifact's number */
+#define JPL_FRAME_LIST_SPACE (JPL_FRAME_LIST_CAP + 1u)   /* indices a space occupies */
+#define JPL_FRAME_LIST_LO_BASE 0u
+#define JPL_FRAME_LIST_HI_BASE JPL_FRAME_LIST_SPACE
+#define JPL_FRAME_LIST_CUR_BASE (jpl_pools_space * JPL_FRAME_LIST_SPACE)   /* the current interval, read through the
+                        space indicator */
+#define JPL_FRAME_LIST_CUR_TOP (JPL_FRAME_LIST_CUR_BASE + JPL_FRAME_LIST_SPACE)
+#define JPL_FRAME_LIST_OTHER_BASE (((jpl_pools_space + 1u) % JPL_POOL_SPACES) * JPL_FRAME_LIST_SPACE)   /* the interval a boundary reads
+                        FROM once it has swapped: the swap makes CUR_*
+                        the space the copies land in, so the pair still
+                        worth naming is the one being abandoned */
+#define JPL_FRAME_LIST_OTHER_TOP (JPL_FRAME_LIST_OTHER_BASE + JPL_FRAME_LIST_SPACE)
 extern jpl_frame_list_cell jpl_frame_list_pool[JPL_POOL_FRAME_LIST];
+extern jpl_ref jpl_frame_list_origin[JPL_POOL_FRAME_LIST];   /* §6.7: where a copied cell came from, one
+                        entry per INDEX so a handle is the only key;
+                        zero is JPL_NIL, i.e. not copied from anywhere
+                        (paragraph 4) */
+typedef char jpl_check_frame_list_two_regions[((JPL_POOL_FRAME_LIST == (JPL_POOL_SPACES * JPL_FRAME_LIST_SPACE)) ? 1 : -1)];
+typedef char jpl_check_frame_list_region_serves_the_cap[((JPL_FRAME_LIST_SPACE - 1u) == JPL_FRAME_LIST_CAP) ? 1 : -1];
+typedef char jpl_check_frame_list_regions_tile_the_array[((JPL_FRAME_LIST_HI_BASE + JPL_FRAME_LIST_SPACE) == JPL_POOL_FRAME_LIST) ? 1 : -1];
+typedef char jpl_check_frame_list_origin_is_the_index_domain[((sizeof (jpl_frame_list_origin) == (JPL_POOL_FRAME_LIST * sizeof (jpl_ref))) ? 1 : -1)];
 
-/* ── the pool runtime (JPL.md §6.6, 5-B.3b-ii-b-1): one bounded region per
-   pool above.  Declarations only — the definitions and bodies are in the
-   generated translation unit sh_run_jpl_pools.c, which includes this header,
-   and that file is the only C in this tree holding a mutable static.  Index 0
-   is JPL_NIL and is never handed out, so a pool of C cells serves C-1.
+/* ── the pool runtime (JPL.md §6.6, 5-B.3b-ii-b-1; two intervals since
+   5-B.3b-ii-b-2b, §6.7 paragraph 4): one bounded region per SPACE per pool
+   above.  Declarations only — the definitions and bodies are in the generated
+   translation unit sh_run_jpl_pools.c, which includes this header, and that
+   file is the only C in this tree holding a mutable static.  Each interval
+   reserves its own index 0 as JPL_NIL, so a space of CAP + 1 indices serves
+   CAP cells and the array's C = 2 * (CAP + 1) indices serve 2 * CAP.  Index 0
+   and index CAP + 1 are the two reserved slots and belong to no cell (§6.7).
    Reclamation is at region granularity because a per-cell free needs the
    reachability rule §6.5's ii-b-2 owns before it is safe, not a function; a
    reset does NOT clear cells, since clearing them at every step boundary would
    price the step by the pool rather than by the data and no lemma requires the
-   bytes to be zero.  is_live is the guard rail that makes a handle carried
-   across a reset observable — not a liveness analysis. */
+   bytes to be zero — the same argument covers `origin`, whose stale entries sit
+   in the interval that becomes the to-space and are written before any scan
+   reads them.  is_live is the guard rail that makes a handle carried across a
+   reset or a swap observable: a comparison against the current interval, not a
+   liveness analysis.  The SCAN POINTER is here since ii-b-2c (§6.7 paragraph
+   5bis), and so is everything it reads: one word accessor pair, one evac, one
+   queue start, one scan step, one drain per pool, plus the counters that make
+   the copy measured rather than described.  Every one of them has a writer in
+   the generated translation unit below — §6.2's rule against a counter nothing
+   writes is why the badtag counter appears only under a pool whose cell has a
+   tag to get wrong. */
 #define JPL_REF_TOP 4294967295u   /* counters saturate here, never wrap (§4.2) */
 typedef char jpl_check_ref_top_is_the_handle_word[((sizeof (jpl_ref) == 4u) ? 1 : -1)];
 
-/* word: jpl_word_pool of JPL_POOL_WORD cells of jpl_text, handled as jpl_wref */
-extern jpl_ref jpl_word_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_word_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* word: jpl_word_pool of JPL_POOL_WORD indices x 2 spaces, 16642 cells per space, handled as jpl_wref
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_word_next;     /* an ABSOLUTE index into JPL_POOL_WORD, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_word_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_word_taken;    /* cells served since the program started */
 extern jpl_ref jpl_word_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_word_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_word_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_word_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_word_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_word_capacity_fits_the_counter[((JPL_POOL_WORD < JPL_REF_TOP) ? 1 : -1)];
-jpl_wref jpl_word_alloc(void);   /* JPL_NIL once the region of JPL_POOL_WORD cells is full */
-jpl_ref jpl_word_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_word_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_wref jpl_word_alloc(void);   /* JPL_NIL once the CURRENT interval of 16642 cells is full */
+jpl_ref jpl_word_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_word_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_word_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_text, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_text registered, so it cannot
+                                    describe a cell other than the one word_edge classes */
+void jpl_word_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_word_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_word_evac(jpl_ref h);   /* copy jpl_text's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on word_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_word_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_word_scan_one(void);   /* rewrite word's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_word_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over word's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* pair_text_text_list: jpl_pair_text_text_list_pool of JPL_POOL_PAIR_TEXT_TEXT_LIST cells of jpl_pair_text_text_list_cell, handled as jpl_pair_text_text_list */
-extern jpl_ref jpl_pair_text_text_list_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_pair_text_text_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* pair_text_text_list: jpl_pair_text_text_list_pool of JPL_POOL_PAIR_TEXT_TEXT_LIST indices x 2 spaces, 128 cells per space, handled as jpl_pair_text_text_list
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_pair_text_text_list_next;     /* an ABSOLUTE index into JPL_POOL_PAIR_TEXT_TEXT_LIST, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_pair_text_text_list_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_pair_text_text_list_taken;    /* cells served since the program started */
 extern jpl_ref jpl_pair_text_text_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_pair_text_text_list_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_pair_text_text_list_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_pair_text_text_list_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_pair_text_text_list_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_pair_text_text_list_capacity_fits_the_counter[((JPL_POOL_PAIR_TEXT_TEXT_LIST < JPL_REF_TOP) ? 1 : -1)];
-jpl_pair_text_text_list jpl_pair_text_text_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_PAIR_TEXT_TEXT_LIST cells is full */
-jpl_ref jpl_pair_text_text_list_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_pair_text_text_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_pair_text_text_list jpl_pair_text_text_list_alloc(void);   /* JPL_NIL once the CURRENT interval of 128 cells is full */
+jpl_ref jpl_pair_text_text_list_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_pair_text_text_list_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_pair_text_text_list_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_pair_text_text_list_cell, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_pair_text_text_list_cell registered, so it cannot
+                                    describe a cell other than the one pair_text_text_list_edge classes */
+void jpl_pair_text_text_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_pair_text_text_list_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_pair_text_text_list_evac(jpl_ref h);   /* copy jpl_pair_text_text_list_cell's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on pair_text_text_list_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_pair_text_text_list_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_pair_text_text_list_scan_one(void);   /* rewrite pair_text_text_list's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_pair_text_text_list_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over pair_text_text_list's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* cmd: jpl_cmd_pool of JPL_POOL_CMD cells of jpl_cmd_node, handled as jpl_cmd */
-extern jpl_ref jpl_cmd_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_cmd_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* cmd: jpl_cmd_pool of JPL_POOL_CMD indices x 2 spaces, 4096 cells per space, handled as jpl_cmd
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_cmd_next;     /* an ABSOLUTE index into JPL_POOL_CMD, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_cmd_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_cmd_taken;    /* cells served since the program started */
 extern jpl_ref jpl_cmd_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_cmd_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_cmd_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_cmd_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_cmd_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
+extern jpl_ref jpl_cmd_badtag; /* a tag word with no row in cmd_edge: the scan stops on
+                                    that cell rather than walking its slots as scalars
+                                    (§6.7 paragraph 5bis).  Emitted only for a tagged
+                                    pool — an untagged cell has no tag to be wrong, and
+                                    §6.2 refuses a counter nothing writes */
 typedef char jpl_check_cmd_capacity_fits_the_counter[((JPL_POOL_CMD < JPL_REF_TOP) ? 1 : -1)];
-jpl_cmd jpl_cmd_alloc(void);   /* JPL_NIL once the region of JPL_POOL_CMD cells is full */
-jpl_ref jpl_cmd_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_cmd_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_cmd jpl_cmd_alloc(void);   /* JPL_NIL once the CURRENT interval of 4096 cells is full */
+jpl_ref jpl_cmd_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_cmd_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_cmd_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_cmd_node, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_cmd_node registered, so it cannot
+                                    describe a cell other than the one cmd_edge classes */
+void jpl_cmd_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_cmd_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_cmd_evac(jpl_ref h);   /* copy jpl_cmd_node's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on cmd_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_cmd_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_cmd_scan_one(void);   /* rewrite cmd's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_cmd_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over cmd's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* text_list: jpl_text_list_pool of JPL_POOL_TEXT_LIST cells of jpl_text_list_cell, handled as jpl_text_list */
-extern jpl_ref jpl_text_list_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_text_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* text_list: jpl_text_list_pool of JPL_POOL_TEXT_LIST indices x 2 spaces, 1024 cells per space, handled as jpl_text_list
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_text_list_next;     /* an ABSOLUTE index into JPL_POOL_TEXT_LIST, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_text_list_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_text_list_taken;    /* cells served since the program started */
 extern jpl_ref jpl_text_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_text_list_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_text_list_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_text_list_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_text_list_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_text_list_capacity_fits_the_counter[((JPL_POOL_TEXT_LIST < JPL_REF_TOP) ? 1 : -1)];
-jpl_text_list jpl_text_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_TEXT_LIST cells is full */
-jpl_ref jpl_text_list_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_text_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_text_list jpl_text_list_alloc(void);   /* JPL_NIL once the CURRENT interval of 1024 cells is full */
+jpl_ref jpl_text_list_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_text_list_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_text_list_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_text_list_cell, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_text_list_cell registered, so it cannot
+                                    describe a cell other than the one text_list_edge classes */
+void jpl_text_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_text_list_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_text_list_evac(jpl_ref h);   /* copy jpl_text_list_cell's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on text_list_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_text_list_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_text_list_scan_one(void);   /* rewrite text_list's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_text_list_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over text_list's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* cmd_list: jpl_cmd_list_pool of JPL_POOL_CMD_LIST cells of jpl_cmd_list_cell, handled as jpl_cmd_list */
-extern jpl_ref jpl_cmd_list_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_cmd_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* cmd_list: jpl_cmd_list_pool of JPL_POOL_CMD_LIST indices x 2 spaces, 1024 cells per space, handled as jpl_cmd_list
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_cmd_list_next;     /* an ABSOLUTE index into JPL_POOL_CMD_LIST, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_cmd_list_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_cmd_list_taken;    /* cells served since the program started */
 extern jpl_ref jpl_cmd_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_cmd_list_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_cmd_list_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_cmd_list_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_cmd_list_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_cmd_list_capacity_fits_the_counter[((JPL_POOL_CMD_LIST < JPL_REF_TOP) ? 1 : -1)];
-jpl_cmd_list jpl_cmd_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_CMD_LIST cells is full */
-jpl_ref jpl_cmd_list_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_cmd_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_cmd_list jpl_cmd_list_alloc(void);   /* JPL_NIL once the CURRENT interval of 1024 cells is full */
+jpl_ref jpl_cmd_list_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_cmd_list_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_cmd_list_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_cmd_list_cell, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_cmd_list_cell registered, so it cannot
+                                    describe a cell other than the one cmd_list_edge classes */
+void jpl_cmd_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_cmd_list_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_cmd_list_evac(jpl_ref h);   /* copy jpl_cmd_list_cell's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on cmd_list_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_cmd_list_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_cmd_list_scan_one(void);   /* rewrite cmd_list's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_cmd_list_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over cmd_list's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* pair_text_list_cmd_list_list: jpl_pair_text_list_cmd_list_list_pool of JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST cells of jpl_pair_text_list_cmd_list_list_cell, handled as jpl_pair_text_list_cmd_list_list */
-extern jpl_ref jpl_pair_text_list_cmd_list_list_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_pair_text_list_cmd_list_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* pair_text_list_cmd_list_list: jpl_pair_text_list_cmd_list_list_pool of JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST indices x 2 spaces, 1024 cells per space, handled as jpl_pair_text_list_cmd_list_list
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_next;     /* an ABSOLUTE index into JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_pair_text_list_cmd_list_list_taken;    /* cells served since the program started */
 extern jpl_ref jpl_pair_text_list_cmd_list_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_pair_text_list_cmd_list_list_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_pair_text_list_cmd_list_list_capacity_fits_the_counter[((JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST < JPL_REF_TOP) ? 1 : -1)];
-jpl_pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST cells is full */
-jpl_ref jpl_pair_text_list_cmd_list_list_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_pair_text_list_cmd_list_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_alloc(void);   /* JPL_NIL once the CURRENT interval of 1024 cells is full */
+jpl_ref jpl_pair_text_list_cmd_list_list_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_pair_text_list_cmd_list_list_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_pair_text_list_cmd_list_list_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_pair_text_list_cmd_list_list_cell, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_pair_text_list_cmd_list_list_cell registered, so it cannot
+                                    describe a cell other than the one pair_text_list_cmd_list_list_edge classes */
+void jpl_pair_text_list_cmd_list_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_pair_text_list_cmd_list_list_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_pair_text_list_cmd_list_list_evac(jpl_ref h);   /* copy jpl_pair_text_list_cmd_list_list_cell's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on pair_text_list_cmd_list_list_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_pair_text_list_cmd_list_list_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_pair_text_list_cmd_list_list_scan_one(void);   /* rewrite pair_text_list_cmd_list_list's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_pair_text_list_cmd_list_list_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over pair_text_list_cmd_list_list's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* frame: jpl_frame_pool of JPL_POOL_FRAME cells of jpl_frame_node, handled as jpl_frame */
-extern jpl_ref jpl_frame_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_frame_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* frame: jpl_frame_pool of JPL_POOL_FRAME indices x 2 spaces, 8192 cells per space, handled as jpl_frame
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_frame_next;     /* an ABSOLUTE index into JPL_POOL_FRAME, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_frame_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_frame_taken;    /* cells served since the program started */
 extern jpl_ref jpl_frame_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_frame_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_frame_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_frame_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_frame_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
+extern jpl_ref jpl_frame_badtag; /* a tag word with no row in frame_edge: the scan stops on
+                                    that cell rather than walking its slots as scalars
+                                    (§6.7 paragraph 5bis).  Emitted only for a tagged
+                                    pool — an untagged cell has no tag to be wrong, and
+                                    §6.2 refuses a counter nothing writes */
 typedef char jpl_check_frame_capacity_fits_the_counter[((JPL_POOL_FRAME < JPL_REF_TOP) ? 1 : -1)];
-jpl_frame jpl_frame_alloc(void);   /* JPL_NIL once the region of JPL_POOL_FRAME cells is full */
-jpl_ref jpl_frame_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_frame_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_frame jpl_frame_alloc(void);   /* JPL_NIL once the CURRENT interval of 8192 cells is full */
+jpl_ref jpl_frame_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_frame_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_frame_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_frame_node, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_frame_node registered, so it cannot
+                                    describe a cell other than the one frame_edge classes */
+void jpl_frame_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_frame_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_frame_evac(jpl_ref h);   /* copy jpl_frame_node's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on frame_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_frame_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_frame_scan_one(void);   /* rewrite frame's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_frame_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over frame's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
-/* frame_list: jpl_frame_list_pool of JPL_POOL_FRAME_LIST cells of jpl_frame_list_cell, handled as jpl_frame_list */
-extern jpl_ref jpl_frame_list_next;     /* lowest index never handed out; 1u is an empty region */
-extern jpl_ref jpl_frame_list_peak;     /* widest any one region got: decision 4's quantity, measured */
+/* frame_list: jpl_frame_list_pool of JPL_POOL_FRAME_LIST indices x 2 spaces, 8192 cells per space, handled as jpl_frame_list
+   (JPL.md §6.7 paragraph 4).  Which space is current is ONE global for the
+   whole runtime, not one flag per pool: the graph moves together at a step
+   boundary, so per-pool indicators would be several chances to disagree about
+   a fact that has one cause. */
+extern jpl_ref jpl_frame_list_next;     /* an ABSOLUTE index into JPL_POOL_FRAME_LIST, always inside the current
+                                    interval: the lowest index not yet handed out, so
+                                    CUR_BASE + 1u is an empty region */
+extern jpl_ref jpl_frame_list_peak;     /* the most cells ANY ONE region served — a count, not
+                                    the high-water index of one big array (decision 4's
+                                    quantity is cells) */
 extern jpl_ref jpl_frame_list_taken;    /* cells served since the program started */
 extern jpl_ref jpl_frame_list_refused;  /* allocations that found no cell: §6.6's saturate-to-error edge */
+extern jpl_ref jpl_frame_list_scan;     /* the to interval's second pointer: the lowest index
+                                    whose cells edges have not been rewritten.  It is a
+                                    counter only in the sense that `next` is one —
+                                    §6.7 paragraph 5bis's drain is what reads it, and it
+                                    starts where reset rewinds next to, so an empty queue
+                                    and an empty region are the same index */
+extern jpl_ref jpl_frame_list_copied;   /* cells evacuated into the to interval, cumulative like
+                                    taken: a boundary's copy count is its delta (§6.7) */
+extern jpl_ref jpl_frame_list_forwarded; /* references answered by an existing copy rather than
+                                    a second cell — the sharing the forwarding pointer
+                                    exists to buy, measured instead of claimed */
+extern jpl_ref jpl_frame_list_badref;   /* evac called on a handle outside the interval it reads
+                                    from: a copy of a copy, a reserved base, an index past
+                                    the array.  5bis's refuse-and-count edge, one per pool
+                                    because which pool was asked is the readable fact */
 typedef char jpl_check_frame_list_capacity_fits_the_counter[((JPL_POOL_FRAME_LIST < JPL_REF_TOP) ? 1 : -1)];
-jpl_frame_list jpl_frame_list_alloc(void);   /* JPL_NIL once the region of JPL_POOL_FRAME_LIST cells is full */
-jpl_ref jpl_frame_list_reset(void);   /* cells returned; next goes back to 1u */
-jpl_bool jpl_frame_list_is_live(jpl_ref h);   /* h names a cell of THIS region */
+jpl_frame_list jpl_frame_list_alloc(void);   /* JPL_NIL once the CURRENT interval of 8192 cells is full */
+jpl_ref jpl_frame_list_reset(void);   /* cells returned; next rewinds to the CURRENT interval's own base + 1u */
+jpl_bool jpl_frame_list_is_live(jpl_ref h);   /* h in the current interval and below next: after
+   a swap a handle from the other interval reads dead WHILE SITTING BELOW
+   next, which is the case §6.6's `h < next` could not distinguish and
+   §6.7's aliasing debt named */
+jpl_ref jpl_frame_list_word_at(jpl_ref h, jpl_ref i);   /* one WORD of jpl_frame_list_cell, in the struct's own
+                                    field order: i is a position, not a byte, and an
+                                    index past the cell answers JPL_NIL (§6.7 paragraph
+                                    5bis).  The chain is derived from the members the
+                                    layout rule that emitted jpl_frame_list_cell registered, so it cannot
+                                    describe a cell other than the one frame_list_edge classes */
+void jpl_frame_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v);   /* the scan's one write, over the
+                                    same arms as jpl_frame_list_word_at: no cell in this tree is
+                                    written through an address */
+jpl_ref jpl_frame_list_evac(jpl_ref h);   /* copy jpl_frame_list_cell's cell h into the current interval and
+                                    return the copy, or forward to the copy already made
+                                    (§6.7 paragraph 5bis: the four-arm test on frame_list_origin,
+                                    one C99 structure assignment, and alloc clearing the
+                                    origin of every cell it hands out) */
+void jpl_frame_list_queue_start(void);   /* scan = CUR_BASE + 1u, the same expression
+                                    reset uses, after evac has copied the
+                                    roots that make the queue non-empty */
+void jpl_frame_list_scan_one(void);   /* rewrite frame_list's EDGE words at scan and advance
+                                    scan by one cell */
+void jpl_frame_list_drain(void);   /* scan_one until scan reaches next: a fixpoint
+                                    over frame_list's to region, bounded by the
+                                    interval (R3) and not recursive (R4) */
 
 /* §4.2 wants one observable place: the saturating sum of every pool's refusals.
    A lowering reads a nil handle as the same edge a fired branch_guardb is
    (§5), and the host reads this as the run's verdict. */
 jpl_nat jpl_pools_refusals(void);
+
+/* Which of the two intervals is current is ONE mutable global (§6.7 paragraph 4),
+   declared beside the pools section that sizes them and written by ONE function.
+   A second writer would be a second cause for a fact the graph agrees on, and
+   the gate counts assignments to the global rather than trusting this sentence:
+   it is the only name in this runtime whose value every pool's bounds read. */
+jpl_nat jpl_pools_swap(void);   /* advance to the next interval; returns the new index,
+                  so a caller can observe the flip without reading the
+                  global it is the one writer of */
+typedef char jpl_check_pools_flip_cycles_the_intervals[
+   (((1u % JPL_POOL_SPACES) == 1u) && ((1u + 1u) % JPL_POOL_SPACES == 0u)) ? 1 : -1];   /* the flip
+   is a TWO-interval cycle, which is exactly what each pool's _two_regions
+   check sizes its array for: raise the headroom factor to three and this fails
+   at compile time instead of leaving a third interval no bound ever selects */
+
+/* The scan's word is a handle whose POOL the edge table says, not one the
+   cell's own type says, so the dispatch over the class ids is ONE function
+   for the whole runtime (§6.7 paragraph 5bis) rather than eight that would
+   each need a second table to name the target.  unclassified is its
+   refuse-and-count edge: the one global that says a class was read that no
+   arm covers, which the gate measures against the target set the tables
+   were built from.  A lowering owns the order — queue_start, evac the roots,
+   drain — and this layer only supplies the parts. */
+extern jpl_nat jpl_pools_unclassified;
+jpl_ref jpl_pools_evac_by_class(jpl_nat cls, jpl_ref h);
 
 /* ── the pool edge tables (JPL.md §6.7, 5-B.3b-ii-b-2a): what each WORD of a
    pool cell means, so a collector's reachability rule is read from a table
@@ -427,6 +1036,16 @@ jpl_nat jpl_pools_refusals(void);
 #define JPL_EDGE_TO_TEXT_LIST_POOL 9u   /* target: jpl_text_list_pool */
 #define JPL_EDGE_TO_WORD_POOL 10u   /* target: jpl_word_pool */
 #define JPL_EDGE_POOL_COUNT 8u   /* targets an edge may name */
+
+typedef char jpl_check_dispatch_arms_cover_every_target[
+    ((JPL_EDGE_POOL_COUNT + 2u) == JPL_EDGE_TO_WORD_POOL) ? 1 : -1];   /* the target ids
+     are handed out in the sorted-stem order above, starting one past the two fixed
+     classes, so the highest id in the domain is COUNT + 2u and it belongs to word.  The
+     dispatch in the pools TU has one arm per target, so this says the LAST arm it can
+     reach is the LAST id a table can contain: an unreachable class would be a table
+     word whose target no arm names, i.e. a live cell the scan leaves in the interval
+     the boundary abandons.  Pinned here rather than in a sentence because the count,
+     the order and the id base are three numbers only the emitter's own sort ties. */
 
 /* word: 1 row x 257 words per jpl_text — the cell is a LEAF: every word is a value, so its scan copies it and follows nothing */
 #define JPL_WORD_NPOS 257u    /* words per cell */

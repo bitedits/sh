@@ -9,20 +9,58 @@
 
 #include "sh_run_jpl.h"
 
-/* ── word: JPL_POOL_WORD cells of jpl_text, handled as jpl_wref ── */
+/* ── word: 16642 cells per space x 2 spaces = JPL_POOL_WORD indices of jpl_text, handled as jpl_wref ── */
 jpl_text jpl_word_pool[JPL_POOL_WORD];
-jpl_ref jpl_word_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_word_origin[JPL_POOL_WORD];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_word_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_word_peak = 0u;
 jpl_ref jpl_word_taken = 0u;
 jpl_ref jpl_word_refused = 0u;
+jpl_ref jpl_word_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_word_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_word_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_word_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_wref jpl_word_alloc(void) {
   jpl_wref h = JPL_NIL;
-  if (jpl_word_next < JPL_POOL_WORD) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_word_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_word_next > JPL_WORD_CUR_BASE) && (jpl_word_next < JPL_WORD_CUR_TOP)) {
     h = jpl_word_next;
     jpl_word_next = jpl_word_next + 1u;
-    if (jpl_word_peak < h) {
-      jpl_word_peak = h;
+    jpl_word_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_word_peak < (h - JPL_WORD_CUR_BASE)) {
+      jpl_word_peak = h - JPL_WORD_CUR_BASE;
     }
     if (jpl_word_taken < JPL_REF_TOP) {
       jpl_word_taken = jpl_word_taken + 1u;
@@ -36,34 +74,191 @@ jpl_wref jpl_word_alloc(void) {
 }
 
 jpl_ref jpl_word_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_word_next - 1u;
-  jpl_word_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_word_next > JPL_WORD_CUR_BASE) && (jpl_word_next <= JPL_WORD_CUR_TOP)) {
+    returned = jpl_word_next - JPL_WORD_CUR_BASE - 1u;
+  }
+  jpl_word_next = JPL_WORD_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_word_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_word_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_WORD_CUR_BASE) && (h < JPL_WORD_CUR_TOP) && (h < jpl_word_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── pair_text_text_list: JPL_POOL_PAIR_TEXT_TEXT_LIST cells of jpl_pair_text_text_list_cell, handled as jpl_pair_text_text_list ── */
+jpl_ref jpl_word_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_text, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_wref with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_word_pool[h].wt_len; }
+  else if ((i >= 1u) && (i < JPL_WORD_NPOS)) { r = jpl_word_pool[h].wt_code[i - 1u]; }
+  return r;
+}
+
+void jpl_word_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_word_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_word_pool[h].wt_len = v; }
+  else if ((i >= 1u) && (i < JPL_WORD_NPOS)) { jpl_word_pool[h].wt_code[i - 1u] = v; }
+}
+
+jpl_ref jpl_word_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_WORD_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_WORD_OTHER_BASE) && (h < JPL_WORD_OTHER_TOP)) {
+    o = jpl_word_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_WORD_CUR_BASE) && (o < jpl_word_next) && (jpl_word_origin[o] == h)) {
+      if (jpl_word_forwarded < JPL_REF_TOP) {
+        jpl_word_forwarded = jpl_word_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_word_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_word_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_text), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_word_pool[t] = jpl_word_pool[h];
+        jpl_word_origin[t] = h;
+        jpl_word_origin[h] = t;
+        if (jpl_word_copied < JPL_REF_TOP) {
+          jpl_word_copied = jpl_word_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_word_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_word_badref < JPL_REF_TOP) {
+      jpl_word_badref = jpl_word_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_word_queue_start(void) {
+  jpl_word_scan = JPL_WORD_CUR_BASE + 1u;
+}
+
+void jpl_word_scan_one(void) {
+  jpl_ref h = jpl_word_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_WORD_NPOS; i = i + 1u) {
+    cls = jpl_word_edge[(row * JPL_WORD_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_word_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_word_word_at(h, i)));
+    }
+  }
+
+  jpl_word_scan = h + 1u;
+}
+
+void jpl_word_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over word's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_word_scan < jpl_word_next) {
+    jpl_word_scan_one();
+  }
+}
+
+/* ── pair_text_text_list: 128 cells per space x 2 spaces = JPL_POOL_PAIR_TEXT_TEXT_LIST indices of jpl_pair_text_text_list_cell, handled as jpl_pair_text_text_list ── */
 jpl_pair_text_text_list_cell jpl_pair_text_text_list_pool[JPL_POOL_PAIR_TEXT_TEXT_LIST];
-jpl_ref jpl_pair_text_text_list_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_pair_text_text_list_origin[JPL_POOL_PAIR_TEXT_TEXT_LIST];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_pair_text_text_list_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_pair_text_text_list_peak = 0u;
 jpl_ref jpl_pair_text_text_list_taken = 0u;
 jpl_ref jpl_pair_text_text_list_refused = 0u;
+jpl_ref jpl_pair_text_text_list_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_pair_text_text_list_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_pair_text_text_list_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_pair_text_text_list_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_pair_text_text_list jpl_pair_text_text_list_alloc(void) {
   jpl_pair_text_text_list h = JPL_NIL;
-  if (jpl_pair_text_text_list_next < JPL_POOL_PAIR_TEXT_TEXT_LIST) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_pair_text_text_list_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_pair_text_text_list_next > JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE) && (jpl_pair_text_text_list_next < JPL_PAIR_TEXT_TEXT_LIST_CUR_TOP)) {
     h = jpl_pair_text_text_list_next;
     jpl_pair_text_text_list_next = jpl_pair_text_text_list_next + 1u;
-    if (jpl_pair_text_text_list_peak < h) {
-      jpl_pair_text_text_list_peak = h;
+    jpl_pair_text_text_list_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_pair_text_text_list_peak < (h - JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE)) {
+      jpl_pair_text_text_list_peak = h - JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE;
     }
     if (jpl_pair_text_text_list_taken < JPL_REF_TOP) {
       jpl_pair_text_text_list_taken = jpl_pair_text_text_list_taken + 1u;
@@ -77,34 +272,194 @@ jpl_pair_text_text_list jpl_pair_text_text_list_alloc(void) {
 }
 
 jpl_ref jpl_pair_text_text_list_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_pair_text_text_list_next - 1u;
-  jpl_pair_text_text_list_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_pair_text_text_list_next > JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE) && (jpl_pair_text_text_list_next <= JPL_PAIR_TEXT_TEXT_LIST_CUR_TOP)) {
+    returned = jpl_pair_text_text_list_next - JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE - 1u;
+  }
+  jpl_pair_text_text_list_next = JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_pair_text_text_list_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_pair_text_text_list_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE) && (h < JPL_PAIR_TEXT_TEXT_LIST_CUR_TOP) && (h < jpl_pair_text_text_list_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── cmd: JPL_POOL_CMD cells of jpl_cmd_node, handled as jpl_cmd ── */
+jpl_ref jpl_pair_text_text_list_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_pair_text_text_list_cell, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_pair_text_text_list with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_pair_text_text_list_pool[h].pair_text_text_list_hd.p_fst; }
+  else if (i == 1u) { r = jpl_pair_text_text_list_pool[h].pair_text_text_list_hd.p_snd; }
+  else if (i == 2u) { r = jpl_pair_text_text_list_pool[h].pair_text_text_list_next; }
+  return r;
+}
+
+void jpl_pair_text_text_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_pair_text_text_list_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_pair_text_text_list_pool[h].pair_text_text_list_hd.p_fst = v; }
+  else if (i == 1u) { jpl_pair_text_text_list_pool[h].pair_text_text_list_hd.p_snd = v; }
+  else if (i == 2u) { jpl_pair_text_text_list_pool[h].pair_text_text_list_next = v; }
+}
+
+jpl_ref jpl_pair_text_text_list_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_PAIR_TEXT_TEXT_LIST_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_PAIR_TEXT_TEXT_LIST_OTHER_BASE) && (h < JPL_PAIR_TEXT_TEXT_LIST_OTHER_TOP)) {
+    o = jpl_pair_text_text_list_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE) && (o < jpl_pair_text_text_list_next) && (jpl_pair_text_text_list_origin[o] == h)) {
+      if (jpl_pair_text_text_list_forwarded < JPL_REF_TOP) {
+        jpl_pair_text_text_list_forwarded = jpl_pair_text_text_list_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_pair_text_text_list_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_pair_text_text_list_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_pair_text_text_list_cell), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_pair_text_text_list_pool[t] = jpl_pair_text_text_list_pool[h];
+        jpl_pair_text_text_list_origin[t] = h;
+        jpl_pair_text_text_list_origin[h] = t;
+        if (jpl_pair_text_text_list_copied < JPL_REF_TOP) {
+          jpl_pair_text_text_list_copied = jpl_pair_text_text_list_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_pair_text_text_list_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_pair_text_text_list_badref < JPL_REF_TOP) {
+      jpl_pair_text_text_list_badref = jpl_pair_text_text_list_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_pair_text_text_list_queue_start(void) {
+  jpl_pair_text_text_list_scan = JPL_PAIR_TEXT_TEXT_LIST_CUR_BASE + 1u;
+}
+
+void jpl_pair_text_text_list_scan_one(void) {
+  jpl_ref h = jpl_pair_text_text_list_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_PAIR_TEXT_TEXT_LIST_NPOS; i = i + 1u) {
+    cls = jpl_pair_text_text_list_edge[(row * JPL_PAIR_TEXT_TEXT_LIST_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_pair_text_text_list_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_pair_text_text_list_word_at(h, i)));
+    }
+  }
+
+  jpl_pair_text_text_list_scan = h + 1u;
+}
+
+void jpl_pair_text_text_list_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over pair_text_text_list's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_pair_text_text_list_scan < jpl_pair_text_text_list_next) {
+    jpl_pair_text_text_list_scan_one();
+  }
+}
+
+/* ── cmd: 4096 cells per space x 2 spaces = JPL_POOL_CMD indices of jpl_cmd_node, handled as jpl_cmd ── */
 jpl_cmd_node jpl_cmd_pool[JPL_POOL_CMD];
-jpl_ref jpl_cmd_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_cmd_origin[JPL_POOL_CMD];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_cmd_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_cmd_peak = 0u;
 jpl_ref jpl_cmd_taken = 0u;
 jpl_ref jpl_cmd_refused = 0u;
+jpl_ref jpl_cmd_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_cmd_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_cmd_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_cmd_badref = 0u;   /* a handle outside the region this boundary reads from */
+jpl_ref jpl_cmd_badtag = 0u;   /* a tag with no row in jpl_cmd_edge */
 
 jpl_cmd jpl_cmd_alloc(void) {
   jpl_cmd h = JPL_NIL;
-  if (jpl_cmd_next < JPL_POOL_CMD) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_cmd_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_cmd_next > JPL_CMD_CUR_BASE) && (jpl_cmd_next < JPL_CMD_CUR_TOP)) {
     h = jpl_cmd_next;
     jpl_cmd_next = jpl_cmd_next + 1u;
-    if (jpl_cmd_peak < h) {
-      jpl_cmd_peak = h;
+    jpl_cmd_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_cmd_peak < (h - JPL_CMD_CUR_BASE)) {
+      jpl_cmd_peak = h - JPL_CMD_CUR_BASE;
     }
     if (jpl_cmd_taken < JPL_REF_TOP) {
       jpl_cmd_taken = jpl_cmd_taken + 1u;
@@ -118,34 +473,207 @@ jpl_cmd jpl_cmd_alloc(void) {
 }
 
 jpl_ref jpl_cmd_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_cmd_next - 1u;
-  jpl_cmd_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_cmd_next > JPL_CMD_CUR_BASE) && (jpl_cmd_next <= JPL_CMD_CUR_TOP)) {
+    returned = jpl_cmd_next - JPL_CMD_CUR_BASE - 1u;
+  }
+  jpl_cmd_next = JPL_CMD_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_cmd_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_cmd_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_CMD_CUR_BASE) && (h < JPL_CMD_CUR_TOP) && (h < jpl_cmd_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── text_list: JPL_POOL_TEXT_LIST cells of jpl_text_list_cell, handled as jpl_text_list ── */
+jpl_ref jpl_cmd_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_cmd_node, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_cmd with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_cmd_pool[h].cmd_tag; }
+  else if (i == 1u) { r = jpl_cmd_pool[h].cmd_slot0; }
+  else if (i == 2u) { r = jpl_cmd_pool[h].cmd_slot1; }
+  else if (i == 3u) { r = jpl_cmd_pool[h].cmd_slot2; }
+  return r;
+}
+
+void jpl_cmd_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_cmd_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_cmd_pool[h].cmd_tag = v; }
+  else if (i == 1u) { jpl_cmd_pool[h].cmd_slot0 = v; }
+  else if (i == 2u) { jpl_cmd_pool[h].cmd_slot1 = v; }
+  else if (i == 3u) { jpl_cmd_pool[h].cmd_slot2 = v; }
+}
+
+jpl_ref jpl_cmd_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_CMD_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_CMD_OTHER_BASE) && (h < JPL_CMD_OTHER_TOP)) {
+    o = jpl_cmd_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_CMD_CUR_BASE) && (o < jpl_cmd_next) && (jpl_cmd_origin[o] == h)) {
+      if (jpl_cmd_forwarded < JPL_REF_TOP) {
+        jpl_cmd_forwarded = jpl_cmd_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_cmd_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_cmd_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_cmd_node), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_cmd_pool[t] = jpl_cmd_pool[h];
+        jpl_cmd_origin[t] = h;
+        jpl_cmd_origin[h] = t;
+        if (jpl_cmd_copied < JPL_REF_TOP) {
+          jpl_cmd_copied = jpl_cmd_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_cmd_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_cmd_badref < JPL_REF_TOP) {
+      jpl_cmd_badref = jpl_cmd_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_cmd_queue_start(void) {
+  jpl_cmd_scan = JPL_CMD_CUR_BASE + 1u;
+}
+
+void jpl_cmd_scan_one(void) {
+  jpl_ref h = jpl_cmd_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  jpl_ref row = 0u;
+  jpl_bool walk = JPL_TRUE;
+
+  /* The row comes from the cell's own tag word, and a tag the table has no row for
+     stops the scan WITHOUT rewriting a word: a row this section does not have has no
+     classes to trust, and walking the slots as if they were scalar is the hard-coded
+     edge §6.7's derivation exists to forbid.  scan still advances below, so a bad tag
+     costs one cell and not the whole drain. */
+  row = jpl_cmd_word_at(h, 0u);
+  if (row >= JPL_CMD_NROWS) {
+    if (jpl_cmd_badtag < JPL_REF_TOP) {
+      jpl_cmd_badtag = jpl_cmd_badtag + 1u;
+    }
+    walk = JPL_FALSE;
+  }
+  if (walk == JPL_TRUE) {
+    for (i = 0u; i < JPL_CMD_NPOS; i = i + 1u) {
+      cls = jpl_cmd_edge[(row * JPL_CMD_NPOS) + i];
+      /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+         (the word was never written), so only an EDGE word is rewritten — with the copy
+         of the handle it holds, through the one runtime dispatch. */
+      if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+        jpl_cmd_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_cmd_word_at(h, i)));
+      }
+    }
+  }
+
+  jpl_cmd_scan = h + 1u;
+}
+
+void jpl_cmd_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over cmd's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_cmd_scan < jpl_cmd_next) {
+    jpl_cmd_scan_one();
+  }
+}
+
+/* ── text_list: 1024 cells per space x 2 spaces = JPL_POOL_TEXT_LIST indices of jpl_text_list_cell, handled as jpl_text_list ── */
 jpl_text_list_cell jpl_text_list_pool[JPL_POOL_TEXT_LIST];
-jpl_ref jpl_text_list_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_text_list_origin[JPL_POOL_TEXT_LIST];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_text_list_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_text_list_peak = 0u;
 jpl_ref jpl_text_list_taken = 0u;
 jpl_ref jpl_text_list_refused = 0u;
+jpl_ref jpl_text_list_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_text_list_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_text_list_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_text_list_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_text_list jpl_text_list_alloc(void) {
   jpl_text_list h = JPL_NIL;
-  if (jpl_text_list_next < JPL_POOL_TEXT_LIST) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_text_list_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_text_list_next > JPL_TEXT_LIST_CUR_BASE) && (jpl_text_list_next < JPL_TEXT_LIST_CUR_TOP)) {
     h = jpl_text_list_next;
     jpl_text_list_next = jpl_text_list_next + 1u;
-    if (jpl_text_list_peak < h) {
-      jpl_text_list_peak = h;
+    jpl_text_list_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_text_list_peak < (h - JPL_TEXT_LIST_CUR_BASE)) {
+      jpl_text_list_peak = h - JPL_TEXT_LIST_CUR_BASE;
     }
     if (jpl_text_list_taken < JPL_REF_TOP) {
       jpl_text_list_taken = jpl_text_list_taken + 1u;
@@ -159,34 +687,191 @@ jpl_text_list jpl_text_list_alloc(void) {
 }
 
 jpl_ref jpl_text_list_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_text_list_next - 1u;
-  jpl_text_list_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_text_list_next > JPL_TEXT_LIST_CUR_BASE) && (jpl_text_list_next <= JPL_TEXT_LIST_CUR_TOP)) {
+    returned = jpl_text_list_next - JPL_TEXT_LIST_CUR_BASE - 1u;
+  }
+  jpl_text_list_next = JPL_TEXT_LIST_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_text_list_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_text_list_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_TEXT_LIST_CUR_BASE) && (h < JPL_TEXT_LIST_CUR_TOP) && (h < jpl_text_list_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── cmd_list: JPL_POOL_CMD_LIST cells of jpl_cmd_list_cell, handled as jpl_cmd_list ── */
+jpl_ref jpl_text_list_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_text_list_cell, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_text_list with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_text_list_pool[h].text_list_hd; }
+  else if (i == 1u) { r = jpl_text_list_pool[h].text_list_next; }
+  return r;
+}
+
+void jpl_text_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_text_list_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_text_list_pool[h].text_list_hd = v; }
+  else if (i == 1u) { jpl_text_list_pool[h].text_list_next = v; }
+}
+
+jpl_ref jpl_text_list_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_TEXT_LIST_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_TEXT_LIST_OTHER_BASE) && (h < JPL_TEXT_LIST_OTHER_TOP)) {
+    o = jpl_text_list_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_TEXT_LIST_CUR_BASE) && (o < jpl_text_list_next) && (jpl_text_list_origin[o] == h)) {
+      if (jpl_text_list_forwarded < JPL_REF_TOP) {
+        jpl_text_list_forwarded = jpl_text_list_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_text_list_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_text_list_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_text_list_cell), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_text_list_pool[t] = jpl_text_list_pool[h];
+        jpl_text_list_origin[t] = h;
+        jpl_text_list_origin[h] = t;
+        if (jpl_text_list_copied < JPL_REF_TOP) {
+          jpl_text_list_copied = jpl_text_list_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_text_list_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_text_list_badref < JPL_REF_TOP) {
+      jpl_text_list_badref = jpl_text_list_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_text_list_queue_start(void) {
+  jpl_text_list_scan = JPL_TEXT_LIST_CUR_BASE + 1u;
+}
+
+void jpl_text_list_scan_one(void) {
+  jpl_ref h = jpl_text_list_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_TEXT_LIST_NPOS; i = i + 1u) {
+    cls = jpl_text_list_edge[(row * JPL_TEXT_LIST_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_text_list_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_text_list_word_at(h, i)));
+    }
+  }
+
+  jpl_text_list_scan = h + 1u;
+}
+
+void jpl_text_list_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over text_list's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_text_list_scan < jpl_text_list_next) {
+    jpl_text_list_scan_one();
+  }
+}
+
+/* ── cmd_list: 1024 cells per space x 2 spaces = JPL_POOL_CMD_LIST indices of jpl_cmd_list_cell, handled as jpl_cmd_list ── */
 jpl_cmd_list_cell jpl_cmd_list_pool[JPL_POOL_CMD_LIST];
-jpl_ref jpl_cmd_list_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_cmd_list_origin[JPL_POOL_CMD_LIST];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_cmd_list_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_cmd_list_peak = 0u;
 jpl_ref jpl_cmd_list_taken = 0u;
 jpl_ref jpl_cmd_list_refused = 0u;
+jpl_ref jpl_cmd_list_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_cmd_list_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_cmd_list_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_cmd_list_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_cmd_list jpl_cmd_list_alloc(void) {
   jpl_cmd_list h = JPL_NIL;
-  if (jpl_cmd_list_next < JPL_POOL_CMD_LIST) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_cmd_list_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_cmd_list_next > JPL_CMD_LIST_CUR_BASE) && (jpl_cmd_list_next < JPL_CMD_LIST_CUR_TOP)) {
     h = jpl_cmd_list_next;
     jpl_cmd_list_next = jpl_cmd_list_next + 1u;
-    if (jpl_cmd_list_peak < h) {
-      jpl_cmd_list_peak = h;
+    jpl_cmd_list_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_cmd_list_peak < (h - JPL_CMD_LIST_CUR_BASE)) {
+      jpl_cmd_list_peak = h - JPL_CMD_LIST_CUR_BASE;
     }
     if (jpl_cmd_list_taken < JPL_REF_TOP) {
       jpl_cmd_list_taken = jpl_cmd_list_taken + 1u;
@@ -200,34 +885,191 @@ jpl_cmd_list jpl_cmd_list_alloc(void) {
 }
 
 jpl_ref jpl_cmd_list_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_cmd_list_next - 1u;
-  jpl_cmd_list_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_cmd_list_next > JPL_CMD_LIST_CUR_BASE) && (jpl_cmd_list_next <= JPL_CMD_LIST_CUR_TOP)) {
+    returned = jpl_cmd_list_next - JPL_CMD_LIST_CUR_BASE - 1u;
+  }
+  jpl_cmd_list_next = JPL_CMD_LIST_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_cmd_list_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_cmd_list_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_CMD_LIST_CUR_BASE) && (h < JPL_CMD_LIST_CUR_TOP) && (h < jpl_cmd_list_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── pair_text_list_cmd_list_list: JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST cells of jpl_pair_text_list_cmd_list_list_cell, handled as jpl_pair_text_list_cmd_list_list ── */
+jpl_ref jpl_cmd_list_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_cmd_list_cell, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_cmd_list with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_cmd_list_pool[h].cmd_list_hd; }
+  else if (i == 1u) { r = jpl_cmd_list_pool[h].cmd_list_next; }
+  return r;
+}
+
+void jpl_cmd_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_cmd_list_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_cmd_list_pool[h].cmd_list_hd = v; }
+  else if (i == 1u) { jpl_cmd_list_pool[h].cmd_list_next = v; }
+}
+
+jpl_ref jpl_cmd_list_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_CMD_LIST_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_CMD_LIST_OTHER_BASE) && (h < JPL_CMD_LIST_OTHER_TOP)) {
+    o = jpl_cmd_list_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_CMD_LIST_CUR_BASE) && (o < jpl_cmd_list_next) && (jpl_cmd_list_origin[o] == h)) {
+      if (jpl_cmd_list_forwarded < JPL_REF_TOP) {
+        jpl_cmd_list_forwarded = jpl_cmd_list_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_cmd_list_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_cmd_list_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_cmd_list_cell), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_cmd_list_pool[t] = jpl_cmd_list_pool[h];
+        jpl_cmd_list_origin[t] = h;
+        jpl_cmd_list_origin[h] = t;
+        if (jpl_cmd_list_copied < JPL_REF_TOP) {
+          jpl_cmd_list_copied = jpl_cmd_list_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_cmd_list_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_cmd_list_badref < JPL_REF_TOP) {
+      jpl_cmd_list_badref = jpl_cmd_list_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_cmd_list_queue_start(void) {
+  jpl_cmd_list_scan = JPL_CMD_LIST_CUR_BASE + 1u;
+}
+
+void jpl_cmd_list_scan_one(void) {
+  jpl_ref h = jpl_cmd_list_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_CMD_LIST_NPOS; i = i + 1u) {
+    cls = jpl_cmd_list_edge[(row * JPL_CMD_LIST_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_cmd_list_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_cmd_list_word_at(h, i)));
+    }
+  }
+
+  jpl_cmd_list_scan = h + 1u;
+}
+
+void jpl_cmd_list_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over cmd_list's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_cmd_list_scan < jpl_cmd_list_next) {
+    jpl_cmd_list_scan_one();
+  }
+}
+
+/* ── pair_text_list_cmd_list_list: 1024 cells per space x 2 spaces = JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST indices of jpl_pair_text_list_cmd_list_list_cell, handled as jpl_pair_text_list_cmd_list_list ── */
 jpl_pair_text_list_cmd_list_list_cell jpl_pair_text_list_cmd_list_list_pool[JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST];
-jpl_ref jpl_pair_text_list_cmd_list_list_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_pair_text_list_cmd_list_list_origin[JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_pair_text_list_cmd_list_list_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_pair_text_list_cmd_list_list_peak = 0u;
 jpl_ref jpl_pair_text_list_cmd_list_list_taken = 0u;
 jpl_ref jpl_pair_text_list_cmd_list_list_refused = 0u;
+jpl_ref jpl_pair_text_list_cmd_list_list_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_pair_text_list_cmd_list_list_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_pair_text_list_cmd_list_list_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_pair_text_list_cmd_list_list_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_alloc(void) {
   jpl_pair_text_list_cmd_list_list h = JPL_NIL;
-  if (jpl_pair_text_list_cmd_list_list_next < JPL_POOL_PAIR_TEXT_LIST_CMD_LIST_LIST) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_pair_text_list_cmd_list_list_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_pair_text_list_cmd_list_list_next > JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE) && (jpl_pair_text_list_cmd_list_list_next < JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_TOP)) {
     h = jpl_pair_text_list_cmd_list_list_next;
     jpl_pair_text_list_cmd_list_list_next = jpl_pair_text_list_cmd_list_list_next + 1u;
-    if (jpl_pair_text_list_cmd_list_list_peak < h) {
-      jpl_pair_text_list_cmd_list_list_peak = h;
+    jpl_pair_text_list_cmd_list_list_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_pair_text_list_cmd_list_list_peak < (h - JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE)) {
+      jpl_pair_text_list_cmd_list_list_peak = h - JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE;
     }
     if (jpl_pair_text_list_cmd_list_list_taken < JPL_REF_TOP) {
       jpl_pair_text_list_cmd_list_list_taken = jpl_pair_text_list_cmd_list_list_taken + 1u;
@@ -241,34 +1083,194 @@ jpl_pair_text_list_cmd_list_list jpl_pair_text_list_cmd_list_list_alloc(void) {
 }
 
 jpl_ref jpl_pair_text_list_cmd_list_list_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_pair_text_list_cmd_list_list_next - 1u;
-  jpl_pair_text_list_cmd_list_list_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_pair_text_list_cmd_list_list_next > JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE) && (jpl_pair_text_list_cmd_list_list_next <= JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_TOP)) {
+    returned = jpl_pair_text_list_cmd_list_list_next - JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE - 1u;
+  }
+  jpl_pair_text_list_cmd_list_list_next = JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_pair_text_list_cmd_list_list_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_pair_text_list_cmd_list_list_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE) && (h < JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_TOP) && (h < jpl_pair_text_list_cmd_list_list_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── frame: JPL_POOL_FRAME cells of jpl_frame_node, handled as jpl_frame ── */
+jpl_ref jpl_pair_text_list_cmd_list_list_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_pair_text_list_cmd_list_list_cell, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_pair_text_list_cmd_list_list with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_hd.p_fst; }
+  else if (i == 1u) { r = jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_hd.p_snd; }
+  else if (i == 2u) { r = jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_next; }
+  return r;
+}
+
+void jpl_pair_text_list_cmd_list_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_pair_text_list_cmd_list_list_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_hd.p_fst = v; }
+  else if (i == 1u) { jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_hd.p_snd = v; }
+  else if (i == 2u) { jpl_pair_text_list_cmd_list_list_pool[h].pair_text_list_cmd_list_list_next = v; }
+}
+
+jpl_ref jpl_pair_text_list_cmd_list_list_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_BASE) && (h < JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_OTHER_TOP)) {
+    o = jpl_pair_text_list_cmd_list_list_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE) && (o < jpl_pair_text_list_cmd_list_list_next) && (jpl_pair_text_list_cmd_list_list_origin[o] == h)) {
+      if (jpl_pair_text_list_cmd_list_list_forwarded < JPL_REF_TOP) {
+        jpl_pair_text_list_cmd_list_list_forwarded = jpl_pair_text_list_cmd_list_list_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_pair_text_list_cmd_list_list_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_pair_text_list_cmd_list_list_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_pair_text_list_cmd_list_list_cell), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_pair_text_list_cmd_list_list_pool[t] = jpl_pair_text_list_cmd_list_list_pool[h];
+        jpl_pair_text_list_cmd_list_list_origin[t] = h;
+        jpl_pair_text_list_cmd_list_list_origin[h] = t;
+        if (jpl_pair_text_list_cmd_list_list_copied < JPL_REF_TOP) {
+          jpl_pair_text_list_cmd_list_list_copied = jpl_pair_text_list_cmd_list_list_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_pair_text_list_cmd_list_list_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_pair_text_list_cmd_list_list_badref < JPL_REF_TOP) {
+      jpl_pair_text_list_cmd_list_list_badref = jpl_pair_text_list_cmd_list_list_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_pair_text_list_cmd_list_list_queue_start(void) {
+  jpl_pair_text_list_cmd_list_list_scan = JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_CUR_BASE + 1u;
+}
+
+void jpl_pair_text_list_cmd_list_list_scan_one(void) {
+  jpl_ref h = jpl_pair_text_list_cmd_list_list_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NPOS; i = i + 1u) {
+    cls = jpl_pair_text_list_cmd_list_list_edge[(row * JPL_PAIR_TEXT_LIST_CMD_LIST_LIST_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_pair_text_list_cmd_list_list_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_pair_text_list_cmd_list_list_word_at(h, i)));
+    }
+  }
+
+  jpl_pair_text_list_cmd_list_list_scan = h + 1u;
+}
+
+void jpl_pair_text_list_cmd_list_list_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over pair_text_list_cmd_list_list's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_pair_text_list_cmd_list_list_scan < jpl_pair_text_list_cmd_list_list_next) {
+    jpl_pair_text_list_cmd_list_list_scan_one();
+  }
+}
+
+/* ── frame: 8192 cells per space x 2 spaces = JPL_POOL_FRAME indices of jpl_frame_node, handled as jpl_frame ── */
 jpl_frame_node jpl_frame_pool[JPL_POOL_FRAME];
-jpl_ref jpl_frame_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_frame_origin[JPL_POOL_FRAME];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_frame_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_frame_peak = 0u;
 jpl_ref jpl_frame_taken = 0u;
 jpl_ref jpl_frame_refused = 0u;
+jpl_ref jpl_frame_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_frame_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_frame_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_frame_badref = 0u;   /* a handle outside the region this boundary reads from */
+jpl_ref jpl_frame_badtag = 0u;   /* a tag with no row in jpl_frame_edge */
 
 jpl_frame jpl_frame_alloc(void) {
   jpl_frame h = JPL_NIL;
-  if (jpl_frame_next < JPL_POOL_FRAME) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_frame_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_frame_next > JPL_FRAME_CUR_BASE) && (jpl_frame_next < JPL_FRAME_CUR_TOP)) {
     h = jpl_frame_next;
     jpl_frame_next = jpl_frame_next + 1u;
-    if (jpl_frame_peak < h) {
-      jpl_frame_peak = h;
+    jpl_frame_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_frame_peak < (h - JPL_FRAME_CUR_BASE)) {
+      jpl_frame_peak = h - JPL_FRAME_CUR_BASE;
     }
     if (jpl_frame_taken < JPL_REF_TOP) {
       jpl_frame_taken = jpl_frame_taken + 1u;
@@ -282,34 +1284,209 @@ jpl_frame jpl_frame_alloc(void) {
 }
 
 jpl_ref jpl_frame_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_frame_next - 1u;
-  jpl_frame_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_frame_next > JPL_FRAME_CUR_BASE) && (jpl_frame_next <= JPL_FRAME_CUR_TOP)) {
+    returned = jpl_frame_next - JPL_FRAME_CUR_BASE - 1u;
+  }
+  jpl_frame_next = JPL_FRAME_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_frame_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_frame_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_FRAME_CUR_BASE) && (h < JPL_FRAME_CUR_TOP) && (h < jpl_frame_next)) {
     r = JPL_TRUE;
   }
   return r;
 }
 
-/* ── frame_list: JPL_POOL_FRAME_LIST cells of jpl_frame_list_cell, handled as jpl_frame_list ── */
+jpl_ref jpl_frame_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_frame_node, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_frame with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_frame_pool[h].frame_tag; }
+  else if (i == 1u) { r = jpl_frame_pool[h].frame_slot0; }
+  else if (i == 2u) { r = jpl_frame_pool[h].frame_slot1; }
+  else if (i == 3u) { r = jpl_frame_pool[h].frame_slot2; }
+  else if (i == 4u) { r = jpl_frame_pool[h].frame_slot3; }
+  return r;
+}
+
+void jpl_frame_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_frame_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_frame_pool[h].frame_tag = v; }
+  else if (i == 1u) { jpl_frame_pool[h].frame_slot0 = v; }
+  else if (i == 2u) { jpl_frame_pool[h].frame_slot1 = v; }
+  else if (i == 3u) { jpl_frame_pool[h].frame_slot2 = v; }
+  else if (i == 4u) { jpl_frame_pool[h].frame_slot3 = v; }
+}
+
+jpl_ref jpl_frame_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_FRAME_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_FRAME_OTHER_BASE) && (h < JPL_FRAME_OTHER_TOP)) {
+    o = jpl_frame_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_FRAME_CUR_BASE) && (o < jpl_frame_next) && (jpl_frame_origin[o] == h)) {
+      if (jpl_frame_forwarded < JPL_REF_TOP) {
+        jpl_frame_forwarded = jpl_frame_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_frame_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_frame_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_frame_node), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_frame_pool[t] = jpl_frame_pool[h];
+        jpl_frame_origin[t] = h;
+        jpl_frame_origin[h] = t;
+        if (jpl_frame_copied < JPL_REF_TOP) {
+          jpl_frame_copied = jpl_frame_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_frame_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_frame_badref < JPL_REF_TOP) {
+      jpl_frame_badref = jpl_frame_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_frame_queue_start(void) {
+  jpl_frame_scan = JPL_FRAME_CUR_BASE + 1u;
+}
+
+void jpl_frame_scan_one(void) {
+  jpl_ref h = jpl_frame_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  jpl_ref row = 0u;
+  jpl_bool walk = JPL_TRUE;
+
+  /* The row comes from the cell's own tag word, and a tag the table has no row for
+     stops the scan WITHOUT rewriting a word: a row this section does not have has no
+     classes to trust, and walking the slots as if they were scalar is the hard-coded
+     edge §6.7's derivation exists to forbid.  scan still advances below, so a bad tag
+     costs one cell and not the whole drain. */
+  row = jpl_frame_word_at(h, 0u);
+  if (row >= JPL_FRAME_NROWS) {
+    if (jpl_frame_badtag < JPL_REF_TOP) {
+      jpl_frame_badtag = jpl_frame_badtag + 1u;
+    }
+    walk = JPL_FALSE;
+  }
+  if (walk == JPL_TRUE) {
+    for (i = 0u; i < JPL_FRAME_NPOS; i = i + 1u) {
+      cls = jpl_frame_edge[(row * JPL_FRAME_NPOS) + i];
+      /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+         (the word was never written), so only an EDGE word is rewritten — with the copy
+         of the handle it holds, through the one runtime dispatch. */
+      if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+        jpl_frame_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_frame_word_at(h, i)));
+      }
+    }
+  }
+
+  jpl_frame_scan = h + 1u;
+}
+
+void jpl_frame_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over frame's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_frame_scan < jpl_frame_next) {
+    jpl_frame_scan_one();
+  }
+}
+
+/* ── frame_list: 8192 cells per space x 2 spaces = JPL_POOL_FRAME_LIST indices of jpl_frame_list_cell, handled as jpl_frame_list ── */
 jpl_frame_list_cell jpl_frame_list_pool[JPL_POOL_FRAME_LIST];
-jpl_ref jpl_frame_list_next = 1u;   /* index 0 is JPL_NIL and stays reserved (§6.6) */
+jpl_ref jpl_frame_list_origin[JPL_POOL_FRAME_LIST];   /* §6.7's origin table: for a cell copied by a step boundary, the
+                        handle it was copied FROM, so the scan reads its children from
+                        the right place without a spare word in the cell.  One entry per
+                        INDEX — including the two reserved slots, which no handle names —
+                        because a handle is the only key the collector has.  No
+                        initialiser: zero is JPL_NIL, which already means "not copied
+                        from anywhere".  The one store this array gets outside a copy is
+                        in the allocator below: an entry for a cell of the current
+                        interval means THIS round because alloc cleared it, which is what
+                        evac's fourth arm reads (§6.7 paragraph 5bis — and it is charged
+                        per copy, so §6.6's no-clearing argument still holds) */
+jpl_ref jpl_frame_list_next = 1u;   /* the current interval's base + 1u at
+                           start-up (space 0): index 0 is JPL_NIL and
+                           stays reserved, per space */
 jpl_ref jpl_frame_list_peak = 0u;
 jpl_ref jpl_frame_list_taken = 0u;
 jpl_ref jpl_frame_list_refused = 0u;
+jpl_ref jpl_frame_list_scan = 1u;   /* §6.7 paragraph 5bis's second pointer: the to interval's
+                             queue, the lowest index not yet scanned.  1u because
+                             start-up is space 0, whose base is 0 — the same expression
+                             queue_start writes at run time, and no cell is scanned
+                             before a boundary has queued one */
+jpl_ref jpl_frame_list_copied = 0u;   /* fresh cells this pool evacuated */
+jpl_ref jpl_frame_list_forwarded = 0u;   /* evacuate calls answered by an existing copy: the
+                                    sharing hits, and the only quantity that separates a
+                                    copy from a duplicate */
+jpl_ref jpl_frame_list_badref = 0u;   /* a handle outside the region this boundary reads from */
 
 jpl_frame_list jpl_frame_list_alloc(void) {
   jpl_frame_list h = JPL_NIL;
-  if (jpl_frame_list_next < JPL_POOL_FRAME_LIST) {
+  /* The pointer must sit INSIDE the current interval to allocate: after a
+     swap and before the rewind, jpl_frame_list_next still names the interval just
+     abandoned, and a test against the top alone would then serve this
+     region's reserved nil index as if it were a cell.  Refusing instead is
+     §4.2's saturate-to-error, and the refusal counter is what says a driver
+     forgot to rewind. */
+  if ((jpl_frame_list_next > JPL_FRAME_LIST_CUR_BASE) && (jpl_frame_list_next < JPL_FRAME_LIST_CUR_TOP)) {
     h = jpl_frame_list_next;
     jpl_frame_list_next = jpl_frame_list_next + 1u;
-    if (jpl_frame_list_peak < h) {
-      jpl_frame_list_peak = h;
+    jpl_frame_list_origin[h] = JPL_NIL;
+    /* 5bis's one store per cell handed out: an index below the frontier
+       then has an origin THIS round wrote — nil until a copy fills it —
+       which is the fact evac's fourth arm turns into "h is already
+       copied".  Without it a two-round trace reads last round's
+       back-pointer as this round's forwarding pointer. */
+    /* peak is the most cells ONE region served — decision 4's quantity is
+       cells, not positions in one big array — hence the region's base.
+       next > CUR_BASE here, so the subtraction cannot wrap. */
+    if (jpl_frame_list_peak < (h - JPL_FRAME_LIST_CUR_BASE)) {
+      jpl_frame_list_peak = h - JPL_FRAME_LIST_CUR_BASE;
     }
     if (jpl_frame_list_taken < JPL_REF_TOP) {
       jpl_frame_list_taken = jpl_frame_list_taken + 1u;
@@ -323,16 +1500,186 @@ jpl_frame_list jpl_frame_list_alloc(void) {
 }
 
 jpl_ref jpl_frame_list_reset(void) {
-  /* next >= 1u by construction, so this subtraction cannot wrap. */
-  jpl_ref returned = jpl_frame_list_next - 1u;
-  jpl_frame_list_next = 1u;
+  /* Rewind to the CURRENT interval's own base + 1u (§6.7 paragraph 4), not to
+     1u: rewinding to 1u after a swap would free the cells the swap just made
+     current.  The bounds test is not decoration — next may still name the
+     interval just abandoned, and an unsigned subtraction there would wrap,
+     so an abandoned region honestly reports zero cells returned. */
+  jpl_ref returned = 0u;
+  if ((jpl_frame_list_next > JPL_FRAME_LIST_CUR_BASE) && (jpl_frame_list_next <= JPL_FRAME_LIST_CUR_TOP)) {
+    returned = jpl_frame_list_next - JPL_FRAME_LIST_CUR_BASE - 1u;
+  }
+  jpl_frame_list_next = JPL_FRAME_LIST_CUR_BASE + 1u;
   return returned;
 }
 
 jpl_bool jpl_frame_list_is_live(jpl_ref h) {
   jpl_bool r = JPL_FALSE;
-  if ((h != JPL_NIL) && (h < jpl_frame_list_next)) {
+  /* Three bounds, and the middle one is the whole point of ii-b-2b: at one
+     interval `h < next` and `h below the array` said the same thing, so a
+     handle from the PREVIOUS interval was live whenever the current region
+     had grown past it — §6.6's aliasing debt, which this comparison now
+     discharges.  h > CUR_BASE is strict because each region's base is its
+     own reserved JPL_NIL, and h != JPL_NIL is exactly this test at space 0. */
+  if ((h > JPL_FRAME_LIST_CUR_BASE) && (h < JPL_FRAME_LIST_CUR_TOP) && (h < jpl_frame_list_next)) {
     r = JPL_TRUE;
+  }
+  return r;
+}
+
+jpl_ref jpl_frame_list_word_at(jpl_ref h, jpl_ref i) {
+  jpl_ref r = JPL_NIL;
+  /* §6.7 paragraph 5bis: one arm per word of jpl_frame_list_cell, in the struct's own field order,
+     derived from the members the layout rule that emitted it registered.  Every member
+     is one uint32_t (or an array of them), so a word reads as a jpl_frame_list with no cast and no
+     pointer — reading a scalar word as a handle costs nothing, because the two are the
+     same type, and the scan only WRITES the words its table calls EDGE. */
+  if (i == 0u) { r = jpl_frame_list_pool[h].frame_list_hd; }
+  else if (i == 1u) { r = jpl_frame_list_pool[h].frame_list_next; }
+  return r;
+}
+
+void jpl_frame_list_word_put(jpl_ref h, jpl_ref i, jpl_ref v) {
+  /* The mirror of jpl_frame_list_word_at, over the same registered members: the scan's one
+     write, and the reason no cell in this tree is ever written through an address. */
+  if (i == 0u) { jpl_frame_list_pool[h].frame_list_hd = v; }
+  else if (i == 1u) { jpl_frame_list_pool[h].frame_list_next = v; }
+}
+
+jpl_ref jpl_frame_list_evac(jpl_ref h) {
+  jpl_ref r = JPL_NIL;
+  jpl_ref o = JPL_NIL;
+  jpl_ref t = JPL_NIL;
+  /* §6.7 paragraph 5bis.  The domain test comes first: JPL_FRAME_LIST_OTHER_BASE is the interval this
+     boundary reads FROM, so a handle inside it is the only thing an origin entry can
+     mean.  Anything else — an index of the to interval (a copy of a copy), a reserved
+     base, an index past the array — is refused and counted, never copied. */
+  if (h == JPL_NIL) {
+    /* the empty list is not a cell: nothing is copied and no
+       counter moves, which is why JPL_NIL needs no reserved origin slot */
+  } else if ((h > JPL_FRAME_LIST_OTHER_BASE) && (h < JPL_FRAME_LIST_OTHER_TOP)) {
+    o = jpl_frame_list_origin[h];
+    /* Four arms, and the fourth is the one that makes the third true.  o below the
+       frontier means this round wrote o's entry — because alloc CLEARS the origin of
+       every cell it hands out — and a cell is evacuated at most once per round, so
+       o's entry names one source handle and equal-to-h is exactly "this is h's
+       copy".  Without the fourth arm a two-round trace reads a stale back-pointer as
+       a forwarding pointer and hands the parent a cell of the region being abandoned. */
+    if ((o != JPL_NIL) && (o > JPL_FRAME_LIST_CUR_BASE) && (o < jpl_frame_list_next) && (jpl_frame_list_origin[o] == h)) {
+      if (jpl_frame_list_forwarded < JPL_REF_TOP) {
+        jpl_frame_list_forwarded = jpl_frame_list_forwarded + 1u;
+      }
+      r = o;
+    } else {
+      t = jpl_frame_list_alloc();
+      if (t != JPL_NIL) {
+        /* R7's cell is a struct of uint32_t members and jpl_check_frame_list_edge_covers_the_cell
+           pins NPOS * 4u == sizeof (jpl_frame_list_cell), i.e. that no member is padded — which is what
+           makes this ONE statement the whole copy: C99 structure assignment, no pointer,
+           no cast, no aliasing question. */
+        jpl_frame_list_pool[t] = jpl_frame_list_pool[h];
+        jpl_frame_list_origin[t] = h;
+        jpl_frame_list_origin[h] = t;
+        if (jpl_frame_list_copied < JPL_REF_TOP) {
+          jpl_frame_list_copied = jpl_frame_list_copied + 1u;
+        }
+        r = t;
+      }
+      /* t == JPL_NIL: the to interval is full.  jpl_frame_list_refused already
+         counts it (§6.6) and r stays the empty list, which is 5bis's answer for 2c —
+         2d is where an overflow becomes the model's BLimit. */
+    }
+  } else {
+    if (jpl_frame_list_badref < JPL_REF_TOP) {
+      jpl_frame_list_badref = jpl_frame_list_badref + 1u;
+    }
+  }
+  return r;
+}
+
+void jpl_frame_list_queue_start(void) {
+  jpl_frame_list_scan = JPL_FRAME_LIST_CUR_BASE + 1u;
+}
+
+void jpl_frame_list_scan_one(void) {
+  jpl_ref h = jpl_frame_list_scan;
+  jpl_ref i = 0u;
+  jpl_nat cls = 0u;
+  /* An untagged cell is ONE row — the same conclusion edge_decl prints when it calls
+     this pool untagged, reached here without reading the table: the row index is 0u,
+     so the table's first NPOS classes ARE this cell's words.  No tag guard, because
+     there is no tag to be wrong. */
+  const jpl_ref row = 0u;
+  for (i = 0u; i < JPL_FRAME_LIST_NPOS; i = i + 1u) {
+    cls = jpl_frame_list_edge[(row * JPL_FRAME_LIST_NPOS) + i];
+    /* SCALAR needs nothing (its value came with the copy) and UNUSED needs nothing
+       (the word was never written), so only an EDGE word is rewritten — with the copy
+       of the handle it holds, through the one runtime dispatch. */
+    if ((cls != JPL_EDGE_SCALAR) && (cls != JPL_EDGE_UNUSED)) {
+      jpl_frame_list_word_put(h, i, jpl_pools_evac_by_class(cls, jpl_frame_list_word_at(h, i)));
+    }
+  }
+
+  jpl_frame_list_scan = h + 1u;
+}
+
+void jpl_frame_list_drain(void) {
+  /* R3's bound is the interval itself: scan advances one cell per step and only the
+     allocator moves next, so this is a fixpoint over frame_list's to region and every cell is
+     scanned at most once.  R4 holds because the call graph runs one way — drain,
+     scan_one, the dispatch, evac, alloc — and no evac reaches a scan. */
+  while (jpl_frame_list_scan < jpl_frame_list_next) {
+    jpl_frame_list_scan_one();
+  }
+}
+
+
+/* ── which interval is current: ONE value for the whole graph (JPL.md §6.7 paragraph 4)
+   — every pool moves together at a step boundary, so this is not per-pool state, and the
+   pools section of the header declares it beside the bounds that read it.  Start-up is
+   the low interval, whose base is 0, so every jpl_<stem>_next above is already its own
+   base + 1u. ── */
+jpl_nat jpl_pools_space = 0u;
+
+jpl_nat jpl_pools_swap(void) {
+  /* THE one writer of the indicator: verify/c/jpl_emit.sh counts assignments to it in
+   this file and refuses a second one, because a flip nobody owns would make the
+   interval a handle was born in a question no code answers.  Modulo, not a conditional
+   on 0u/1u, so the cycle length is the header's own JPL_POOL_SPACES and the emitted
+   jpl_check_pools_flip_cycles_the_intervals is what says that length is two. */
+  jpl_pools_space = (jpl_pools_space + 1u) % JPL_POOL_SPACES;
+  return jpl_pools_space;
+}
+
+/* ── the one dispatch (JPL.md §6.7 paragraph 5bis): a class id is a number the edge
+   tables were built with, and every pool that can be an edge's target gets exactly one
+   arm here.  One function for the whole runtime rather than one per pool, because the
+   scan's word is a handle whose POOL the table says and not one the cell's own type
+   says — a per-pool dispatch would need a second table to name the target. */
+jpl_nat jpl_pools_unclassified = 0u;
+
+jpl_ref jpl_pools_evac_by_class(jpl_nat cls, jpl_ref h) {
+  jpl_ref r = h;
+  /* The final branch is impossible by construction — this chain and the tables are
+     the same edge_pool_ids () reading of the same registry, and the header's
+     jpl_check_dispatch_arms_cover_every_target pins the last arm's id against the size
+     of the target set — and it is emitted and counted anyway, because the alternative
+     to measuring an impossible case is trusting a sentence about it.  Returning the
+     handle unchanged is the least wrong action: the word then names a cell in the
+     abandoned interval, is_live rejects it, and the failure surfaces as a dead handle
+     instead of a cell that looks live. */
+  if (cls == JPL_EDGE_TO_CMD_POOL) { r = jpl_cmd_evac(h); }
+  else if (cls == JPL_EDGE_TO_CMD_LIST_POOL) { r = jpl_cmd_list_evac(h); }
+  else if (cls == JPL_EDGE_TO_FRAME_POOL) { r = jpl_frame_evac(h); }
+  else if (cls == JPL_EDGE_TO_FRAME_LIST_POOL) { r = jpl_frame_list_evac(h); }
+  else if (cls == JPL_EDGE_TO_PAIR_TEXT_LIST_CMD_LIST_LIST_POOL) { r = jpl_pair_text_list_cmd_list_list_evac(h); }
+  else if (cls == JPL_EDGE_TO_PAIR_TEXT_TEXT_LIST_POOL) { r = jpl_pair_text_text_list_evac(h); }
+  else if (cls == JPL_EDGE_TO_TEXT_LIST_POOL) { r = jpl_text_list_evac(h); }
+  else if (cls == JPL_EDGE_TO_WORD_POOL) { r = jpl_word_evac(h); }
+  else {
+    if (jpl_pools_unclassified < JPL_REF_TOP) {
+      jpl_pools_unclassified = jpl_pools_unclassified + 1u;
+    }
   }
   return r;
 }
